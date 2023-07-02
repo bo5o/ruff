@@ -272,7 +272,7 @@ def read_projects_jsonl(projects_jsonl: Path) -> dict[tuple[str, str], Repositor
     return repositories
 
 
-T = TypeVar("T")
+T = TypeVar("T")  # noqa: WPS111
 
 
 async def main(
@@ -397,7 +397,7 @@ async def main(
             print("| ---- | ------- | --------- | -------- |")
             for rule, (additions, removals) in sorted(
                 rule_changes.items(),
-                key=lambda x: (x[1][0] + x[1][1]),
+                key=lambda x: (x[1][0] + x[1][1]),  # noqa: WPS111
                 reverse=True,
             ):
                 print(f"| {rule} | {additions + removals} | {additions} | {removals} |")

@@ -824,6 +824,9 @@ pub fn code_to_rule(linter: Linter, code: &str) -> Option<(RuleGroup, Rule)> {
         (Flake8Slots, "001") => (RuleGroup::Unspecified, rules::flake8_slots::rules::NoSlotsInTupleSubclass),
         (Flake8Slots, "002") => (RuleGroup::Unspecified, rules::flake8_slots::rules::NoSlotsInNamedtupleSubclass),
 
+        // wemake-python-styleguide
+        (WemakePythonStyleguide, "111") => (RuleGroup::Unspecified, rules::wemake_python_styleguide::rules::TooShortName),
+
         _ => return None,
     })
 }

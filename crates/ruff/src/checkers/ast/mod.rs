@@ -46,7 +46,7 @@ use crate::rules::{
     flake8_simplify, flake8_slots, flake8_tidy_imports, flake8_type_checking,
     flake8_unused_arguments, flake8_use_pathlib, flynt, mccabe, numpy, pandas_vet, pep8_naming,
     perflint, pycodestyle, pydocstyle, pyflakes, pygrep_hooks, pylint, pyupgrade, ruff,
-    tryceratops,
+    tryceratops, wemake_python_styleguide,
 };
 use crate::settings::types::PythonVersion;
 use crate::settings::{flags, Settings};
@@ -601,6 +601,9 @@ where
                 if self.enabled(Rule::YieldInForLoop) {
                     pyupgrade::rules::yield_in_for_loop(self, stmt);
                 }
+                if self.enabled(Rule::TooShortName) {
+                    wemake_python_styleguide::rules::too_short_name(self, name, true);
+                }
                 if let ScopeKind::Class(class_def) = self.semantic.scope().kind {
                     if self.enabled(Rule::BuiltinAttributeShadowing) {
                         flake8_builtins::rules::builtin_attribute_shadowing(
@@ -767,6 +770,9 @@ where
                 if self.enabled(Rule::SingleStringSlots) {
                     pylint::rules::single_string_slots(self, class_def);
                 }
+                if self.enabled(Rule::TooShortName) {
+                    wemake_python_styleguide::rules::too_short_name(self, name, true);
+                }
             }
             Stmt::Import(ast::StmtImport { names, range: _ }) => {
                 if self.enabled(Rule::MultipleImportsOnOneLine) {
@@ -833,6 +839,10 @@ where
                                     AnyShadowing::from(stmt),
                                 );
                             }
+                        }
+
+                        if self.enabled(Rule::TooShortName) {
+                            wemake_python_styleguide::rules::too_short_name(self, alias, true);
                         }
                     }
                     if self.enabled(Rule::Debugger) {
@@ -1087,6 +1097,9 @@ where
                                     AnyShadowing::from(stmt),
                                 );
                             }
+                        }
+                        if self.enabled(Rule::TooShortName) {
+                            wemake_python_styleguide::rules::too_short_name(self, alias, true);
                         }
 
                         let mut flags = BindingFlags::EXTERNAL;
@@ -1687,6 +1700,11 @@ where
                         }
                     }
                 }
+                for target in targets.iter() {
+                    if self.enabled(Rule::TooShortName) {
+                        wemake_python_styleguide::rules::too_short_name(self, target, true);
+                    }
+                }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
@@ -1713,6 +1731,11 @@ where
                         stmt,
                     );
                 }
+
+                if self.enabled(Rule::TooShortName) {
+                    wemake_python_styleguide::rules::too_short_name(self, target, true);
+                }
+
                 if self.is_stub {
                     if let Some(value) = value {
                         if self.enabled(Rule::AssignmentDefaultInStub) {
@@ -4032,6 +4055,9 @@ where
         if self.enabled(Rule::BuiltinArgumentShadowing) {
             flake8_builtins::rules::builtin_argument_shadowing(self, arg);
         }
+        if self.enabled(Rule::TooShortName) {
+            wemake_python_styleguide::rules::too_short_name(self, arg, true);
+        }
     }
 
     fn visit_pattern(&mut self, pattern: &'b Pattern) {
@@ -4052,6 +4078,9 @@ where
                 BindingKind::Assignment,
                 BindingFlags::empty(),
             );
+            if self.enabled(Rule::TooShortName) {
+                wemake_python_styleguide::rules::too_short_name(self, name, true);
+            }
         }
 
         walk_pattern(self, pattern);

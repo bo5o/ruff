@@ -199,6 +199,9 @@ pub enum Linter {
     /// Ruff-specific rules
     #[prefix = "RUF"]
     Ruff,
+    /// [wemake-python-styleguide](https://wemake-python-styleguide.readthedocs.io/)
+    #[prefix = "WPS"]
+    WemakePythonStyleguide,
 }
 
 pub trait RuleNamespace: Sized {
