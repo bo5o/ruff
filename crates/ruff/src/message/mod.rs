@@ -1,69 +1,83 @@
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::ops::Deref;
+
+use ruff_text_size::{TextRange, TextSize};
+use rustc_hash::FxHashMap;
+
+use crate::source_kind::SourceKind;
+pub use azure::AzureEmitter;
+pub use github::GithubEmitter;
+pub use gitlab::GitlabEmitter;
+pub use grouped::GroupedEmitter;
+pub use json::JsonEmitter;
+pub use json_lines::JsonLinesEmitter;
+pub use junit::JunitEmitter;
+pub use pylint::PylintEmitter;
+use ruff_diagnostics::{Diagnostic, DiagnosticKind, Fix};
+use ruff_python_ast::source_code::{SourceFile, SourceLocation};
+pub use text::TextEmitter;
+
 mod azure;
 mod diff;
 mod github;
 mod gitlab;
 mod grouped;
 mod json;
+mod json_lines;
 mod junit;
 mod pylint;
 mod text;
 
-use rustc_hash::FxHashMap;
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::io::Write;
-
-pub use azure::AzureEmitter;
-pub use github::GithubEmitter;
-pub use gitlab::GitlabEmitter;
-pub use grouped::GroupedEmitter;
-pub use json::JsonEmitter;
-pub use junit::JunitEmitter;
-pub use pylint::PylintEmitter;
-pub use rustpython_parser::ast::Location;
-pub use text::TextEmitter;
-
-use crate::jupyter::JupyterIndex;
-use ruff_diagnostics::{Diagnostic, DiagnosticKind, Fix};
-use ruff_python_ast::source_code::SourceFile;
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct Message {
     pub kind: DiagnosticKind,
-    pub location: Location,
-    pub end_location: Location,
-    pub fix: Fix,
+    pub range: TextRange,
+    pub fix: Option<Fix>,
     pub file: SourceFile,
-    pub noqa_row: usize,
+    pub noqa_offset: TextSize,
 }
 
 impl Message {
-    pub fn from_diagnostic(diagnostic: Diagnostic, file: SourceFile, noqa_row: usize) -> Self {
+    pub fn from_diagnostic(
+        diagnostic: Diagnostic,
+        file: SourceFile,
+        noqa_offset: TextSize,
+    ) -> Self {
         Self {
+            range: diagnostic.range(),
             kind: diagnostic.kind,
-            location: Location::new(diagnostic.location.row(), diagnostic.location.column() + 1),
-            end_location: Location::new(
-                diagnostic.end_location.row(),
-                diagnostic.end_location.column() + 1,
-            ),
             fix: diagnostic.fix,
             file,
-            noqa_row,
+            noqa_offset,
         }
     }
 
     pub fn filename(&self) -> &str {
         self.file.name()
     }
+
+    pub fn compute_start_location(&self) -> SourceLocation {
+        self.file.to_source_code().source_location(self.start())
+    }
+
+    pub fn compute_end_location(&self) -> SourceLocation {
+        self.file.to_source_code().source_location(self.end())
+    }
+
+    pub const fn start(&self) -> TextSize {
+        self.range.start()
+    }
+
+    pub const fn end(&self) -> TextSize {
+        self.range.end()
+    }
 }
 
 impl Ord for Message {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.filename(), self.location.row(), self.location.column()).cmp(&(
-            other.filename(),
-            other.location.row(),
-            other.location.column(),
-        ))
+        (&self.file, self.start()).cmp(&(&other.file, other.start()))
     }
 }
 
@@ -73,13 +87,29 @@ impl PartialOrd for Message {
     }
 }
 
-fn group_messages_by_filename(messages: &[Message]) -> BTreeMap<&str, Vec<&Message>> {
+struct MessageWithLocation<'a> {
+    message: &'a Message,
+    start_location: SourceLocation,
+}
+
+impl Deref for MessageWithLocation<'_> {
+    type Target = Message;
+
+    fn deref(&self) -> &Self::Target {
+        self.message
+    }
+}
+
+fn group_messages_by_filename(messages: &[Message]) -> BTreeMap<&str, Vec<MessageWithLocation>> {
     let mut grouped_messages = BTreeMap::default();
     for message in messages {
         grouped_messages
             .entry(message.filename())
             .or_insert_with(Vec::new)
-            .push(message);
+            .push(MessageWithLocation {
+                message,
+                start_location: message.compute_start_location(),
+            });
     }
     grouped_messages
 }
@@ -99,33 +129,35 @@ pub trait Emitter {
 
 /// Context passed to [`Emitter`].
 pub struct EmitterContext<'a> {
-    jupyter_indices: &'a FxHashMap<String, JupyterIndex>,
+    source_kind: &'a FxHashMap<String, SourceKind>,
 }
 
 impl<'a> EmitterContext<'a> {
-    pub fn new(jupyter_indices: &'a FxHashMap<String, JupyterIndex>) -> Self {
-        Self { jupyter_indices }
+    pub fn new(source_kind: &'a FxHashMap<String, SourceKind>) -> Self {
+        Self { source_kind }
     }
 
     /// Tests if the file with `name` is a jupyter notebook.
     pub fn is_jupyter_notebook(&self, name: &str) -> bool {
-        self.jupyter_indices.contains_key(name)
+        self.source_kind
+            .get(name)
+            .map_or(false, SourceKind::is_jupyter)
     }
 
-    /// Returns the file's [`JupyterIndex`] if the file `name` is a jupyter notebook.
-    pub fn jupyter_index(&self, name: &str) -> Option<&JupyterIndex> {
-        self.jupyter_indices.get(name)
+    pub fn source_kind(&self, name: &str) -> Option<&SourceKind> {
+        self.source_kind.get(name)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::message::{Emitter, EmitterContext, Location, Message};
-    use crate::rules::pyflakes::rules::{UndefinedName, UnusedImport, UnusedVariable};
-    use ruff_diagnostics::{Diagnostic, Edit, Fix};
-    use ruff_python_ast::source_code::SourceFileBuilder;
-    use ruff_python_ast::types::Range;
+    use ruff_text_size::{TextRange, TextSize};
     use rustc_hash::FxHashMap;
+
+    use ruff_diagnostics::{Diagnostic, DiagnosticKind, Edit, Fix};
+    use ruff_python_ast::source_code::SourceFileBuilder;
+
+    use crate::message::{Emitter, EmitterContext, Message};
 
     pub(super) fn create_messages() -> Vec<Message> {
         let fib = r#"import os
@@ -143,44 +175,53 @@ def fibonacci(n):
 "#;
 
         let unused_import = Diagnostic::new(
-            UnusedImport {
-                name: "os".to_string(),
-                context: None,
-                multiple: false,
+            DiagnosticKind {
+                name: "UnusedImport".to_string(),
+                body: "`os` imported but unused".to_string(),
+                suggestion: Some("Remove unused import: `os`".to_string()),
             },
-            Range::new(Location::new(1, 7), Location::new(1, 9)),
-        );
+            TextRange::new(TextSize::from(7), TextSize::from(9)),
+        )
+        .with_fix(Fix::suggested(Edit::range_deletion(TextRange::new(
+            TextSize::from(0),
+            TextSize::from(10),
+        ))));
 
-        let fib_source = SourceFileBuilder::new("fib.py").source_text(fib).finish();
+        let fib_source = SourceFileBuilder::new("fib.py", fib).finish();
 
         let unused_variable = Diagnostic::new(
-            UnusedVariable {
-                name: "x".to_string(),
+            DiagnosticKind {
+                name: "UnusedVariable".to_string(),
+                body: "Local variable `x` is assigned to but never used".to_string(),
+                suggestion: Some("Remove assignment to unused variable `x`".to_string()),
             },
-            Range::new(Location::new(6, 4), Location::new(6, 5)),
+            TextRange::new(TextSize::from(94), TextSize::from(95)),
         )
-        .with_fix(Fix::new(vec![Edit::deletion(
-            Location::new(6, 4),
-            Location::new(6, 9),
-        )]));
+        .with_fix(Fix::suggested(Edit::deletion(
+            TextSize::from(94),
+            TextSize::from(99),
+        )));
 
         let file_2 = r#"if a == 1: pass"#;
 
         let undefined_name = Diagnostic::new(
-            UndefinedName {
-                name: "a".to_string(),
+            DiagnosticKind {
+                name: "UndefinedName".to_string(),
+                body: "Undefined name `a`".to_string(),
+                suggestion: None,
             },
-            Range::new(Location::new(1, 3), Location::new(1, 4)),
+            TextRange::new(TextSize::from(3), TextSize::from(4)),
         );
 
-        let file_2_source = SourceFileBuilder::new("undef.py")
-            .source_text(file_2)
-            .finish();
+        let file_2_source = SourceFileBuilder::new("undef.py", file_2).finish();
 
+        let unused_import_start = unused_import.start();
+        let unused_variable_start = unused_variable.start();
+        let undefined_name_start = undefined_name.start();
         vec![
-            Message::from_diagnostic(unused_import, fib_source.clone(), 1),
-            Message::from_diagnostic(unused_variable, fib_source, 1),
-            Message::from_diagnostic(undefined_name, file_2_source, 1),
+            Message::from_diagnostic(unused_import, fib_source.clone(), unused_import_start),
+            Message::from_diagnostic(unused_variable, fib_source, unused_variable_start),
+            Message::from_diagnostic(undefined_name, file_2_source, undefined_name_start),
         ]
     }
 
@@ -188,8 +229,8 @@ def fibonacci(n):
         emitter: &mut dyn Emitter,
         messages: &[Message],
     ) -> String {
-        let indices = FxHashMap::default();
-        let context = EmitterContext::new(&indices);
+        let source_kinds = FxHashMap::default();
+        let context = EmitterContext::new(&source_kinds);
         let mut output: Vec<u8> = Vec::new();
         emitter.emit(&mut output, messages, &context).unwrap();
 

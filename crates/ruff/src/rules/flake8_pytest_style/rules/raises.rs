@@ -1,10 +1,10 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword, Stmt, StmtKind, Withitem};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged, Stmt, WithItem};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::call_path::format_call_path;
 use ruff_python_ast::call_path::from_qualified_name;
-use ruff_python_ast::types::Range;
+use ruff_python_semantic::SemanticModel;
 
 use crate::checkers::ast::Checker;
 use crate::registry::Rule;
@@ -23,7 +23,7 @@ impl Violation for PytestRaisesWithMultipleStatements {
 
 #[violation]
 pub struct PytestRaisesTooBroad {
-    pub exception: String,
+    exception: String,
 }
 
 impl Violation for PytestRaisesTooBroad {
@@ -47,48 +47,43 @@ impl Violation for PytestRaisesWithoutException {
     }
 }
 
-fn is_pytest_raises(checker: &Checker, func: &Expr) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(func)
-        .map_or(false, |call_path| {
-            call_path.as_slice() == ["pytest", "raises"]
-        })
+fn is_pytest_raises(func: &Expr, semantic: &SemanticModel) -> bool {
+    semantic.resolve_call_path(func).map_or(false, |call_path| {
+        matches!(call_path.as_slice(), ["pytest", "raises"])
+    })
 }
 
 const fn is_non_trivial_with_body(body: &[Stmt]) -> bool {
     if body.len() > 1 {
         true
     } else if let Some(first_body_stmt) = body.first() {
-        !matches!(first_body_stmt.node, StmtKind::Pass)
+        !first_body_stmt.is_pass_stmt()
     } else {
         false
     }
 }
 
-pub fn raises_call(checker: &mut Checker, func: &Expr, args: &[Expr], keywords: &[Keyword]) {
-    if is_pytest_raises(checker, func) {
-        if checker
-            .settings
-            .rules
-            .enabled(Rule::PytestRaisesWithoutException)
-        {
+pub(crate) fn raises_call(checker: &mut Checker, func: &Expr, args: &[Expr], keywords: &[Keyword]) {
+    if is_pytest_raises(func, checker.semantic()) {
+        if checker.enabled(Rule::PytestRaisesWithoutException) {
             if args.is_empty() && keywords.is_empty() {
-                checker.diagnostics.push(Diagnostic::new(
-                    PytestRaisesWithoutException,
-                    Range::from(func),
-                ));
+                checker
+                    .diagnostics
+                    .push(Diagnostic::new(PytestRaisesWithoutException, func.range()));
             }
         }
 
-        if checker.settings.rules.enabled(Rule::PytestRaisesTooBroad) {
-            let match_keyword = keywords
-                .iter()
-                .find(|kw| kw.node.arg == Some("match".to_string()));
+        if checker.enabled(Rule::PytestRaisesTooBroad) {
+            let match_keyword = keywords.iter().find(|keyword| {
+                keyword
+                    .arg
+                    .as_ref()
+                    .map_or(false, |arg| arg.as_str() == "match")
+            });
 
             if let Some(exception) = args.first() {
                 if let Some(match_keyword) = match_keyword {
-                    if is_empty_or_null_string(&match_keyword.node.value) {
+                    if is_empty_or_null_string(&match_keyword.value) {
                         exception_needs_match(checker, exception);
                     }
                 } else {
@@ -99,11 +94,16 @@ pub fn raises_call(checker: &mut Checker, func: &Expr, args: &[Expr], keywords: 
     }
 }
 
-pub fn complex_raises(checker: &mut Checker, stmt: &Stmt, items: &[Withitem], body: &[Stmt]) {
+pub(crate) fn complex_raises(
+    checker: &mut Checker,
+    stmt: &Stmt,
+    items: &[WithItem],
+    body: &[Stmt],
+) {
     let mut is_too_complex = false;
 
-    let raises_called = items.iter().any(|item| match &item.context_expr.node {
-        ExprKind::Call { func, .. } => is_pytest_raises(checker, func),
+    let raises_called = items.iter().any(|item| match &item.context_expr {
+        Expr::Call(ast::ExprCall { func, .. }) => is_pytest_raises(func, checker.semantic()),
         _ => false,
     });
 
@@ -112,19 +112,20 @@ pub fn complex_raises(checker: &mut Checker, stmt: &Stmt, items: &[Withitem], bo
         if body.len() > 1 {
             is_too_complex = true;
         } else if let Some(first_stmt) = body.first() {
-            match &first_stmt.node {
-                StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
+            match first_stmt {
+                Stmt::With(ast::StmtWith { body, .. })
+                | Stmt::AsyncWith(ast::StmtAsyncWith { body, .. }) => {
                     if is_non_trivial_with_body(body) {
                         is_too_complex = true;
                     }
                 }
-                StmtKind::If { .. }
-                | StmtKind::For { .. }
-                | StmtKind::Match { .. }
-                | StmtKind::AsyncFor { .. }
-                | StmtKind::While { .. }
-                | StmtKind::Try { .. }
-                | StmtKind::TryStar { .. } => {
+                Stmt::If(_)
+                | Stmt::For(_)
+                | Stmt::Match(_)
+                | Stmt::AsyncFor(_)
+                | Stmt::While(_)
+                | Stmt::Try(_)
+                | Stmt::TryStar(_) => {
                     is_too_complex = true;
                 }
                 _ => {}
@@ -134,7 +135,7 @@ pub fn complex_raises(checker: &mut Checker, stmt: &Stmt, items: &[Withitem], bo
         if is_too_complex {
             checker.diagnostics.push(Diagnostic::new(
                 PytestRaisesWithMultipleStatements,
-                Range::from(stmt),
+                stmt.range(),
             ));
         }
     }
@@ -143,7 +144,7 @@ pub fn complex_raises(checker: &mut Checker, stmt: &Stmt, items: &[Withitem], bo
 /// PT011
 fn exception_needs_match(checker: &mut Checker, exception: &Expr) {
     if let Some(call_path) = checker
-        .ctx
+        .semantic()
         .resolve_call_path(exception)
         .and_then(|call_path| {
             let is_broad_exception = checker
@@ -169,7 +170,7 @@ fn exception_needs_match(checker: &mut Checker, exception: &Expr) {
             PytestRaisesTooBroad {
                 exception: call_path,
             },
-            Range::from(exception),
+            exception.range(),
         ));
     }
 }

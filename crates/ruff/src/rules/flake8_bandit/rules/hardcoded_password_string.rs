@@ -1,76 +1,94 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+
+use crate::checkers::ast::Checker;
 
 use super::super::helpers::{matches_password_name, string_literal};
 
 #[violation]
 pub struct HardcodedPasswordString {
-    pub string: String,
+    name: String,
 }
 
 impl Violation for HardcodedPasswordString {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let HardcodedPasswordString { string } = self;
-        format!("Possible hardcoded password: \"{}\"", string.escape_debug())
+        let HardcodedPasswordString { name } = self;
+        format!(
+            "Possible hardcoded password assigned to: \"{}\"",
+            name.escape_debug()
+        )
     }
 }
 
-fn is_password_target(target: &Expr) -> bool {
-    let target_name = match &target.node {
+fn password_target(target: &Expr) -> Option<&str> {
+    let target_name = match target {
         // variable = "s3cr3t"
-        ExprKind::Name { id, .. } => id,
+        Expr::Name(ast::ExprName { id, .. }) => id.as_str(),
         // d["password"] = "s3cr3t"
-        ExprKind::Subscript { slice, .. } => match &slice.node {
-            ExprKind::Constant {
+        Expr::Subscript(ast::ExprSubscript { slice, .. }) => match slice.as_ref() {
+            Expr::Constant(ast::ExprConstant {
                 value: Constant::Str(string),
                 ..
-            } => string,
-            _ => return false,
+            }) => string,
+            _ => return None,
         },
         // obj.password = "s3cr3t"
-        ExprKind::Attribute { attr, .. } => attr,
-        _ => return false,
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => attr,
+        _ => return None,
     };
 
-    matches_password_name(target_name)
+    if matches_password_name(target_name) {
+        Some(target_name)
+    } else {
+        None
+    }
 }
 
 /// S105
-pub fn compare_to_hardcoded_password_string(left: &Expr, comparators: &[Expr]) -> Vec<Diagnostic> {
-    comparators
-        .iter()
-        .filter_map(|comp| {
-            let string = string_literal(comp).filter(|string| !string.is_empty())?;
-            if !is_password_target(left) {
+pub(crate) fn compare_to_hardcoded_password_string(
+    checker: &mut Checker,
+    left: &Expr,
+    comparators: &[Expr],
+) {
+    checker
+        .diagnostics
+        .extend(comparators.iter().filter_map(|comp| {
+            string_literal(comp).filter(|string| !string.is_empty())?;
+            let Some(name) = password_target(left) else {
                 return None;
-            }
+            };
             Some(Diagnostic::new(
                 HardcodedPasswordString {
-                    string: string.to_string(),
+                    name: name.to_string(),
                 },
-                Range::from(comp),
+                comp.range(),
             ))
-        })
-        .collect()
+        }));
 }
 
 /// S105
-pub fn assign_hardcoded_password_string(value: &Expr, targets: &[Expr]) -> Option<Diagnostic> {
-    if let Some(string) = string_literal(value).filter(|string| !string.is_empty()) {
+pub(crate) fn assign_hardcoded_password_string(
+    checker: &mut Checker,
+    value: &Expr,
+    targets: &[Expr],
+) {
+    if string_literal(value)
+        .filter(|string| !string.is_empty())
+        .is_some()
+    {
         for target in targets {
-            if is_password_target(target) {
-                return Some(Diagnostic::new(
+            if let Some(name) = password_target(target) {
+                checker.diagnostics.push(Diagnostic::new(
                     HardcodedPasswordString {
-                        string: string.to_string(),
+                        name: name.to_string(),
                     },
-                    Range::from(value),
+                    value.range(),
                 ));
+                return;
             }
         }
     }
-    None
 }

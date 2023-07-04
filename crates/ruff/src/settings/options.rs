@@ -1,24 +1,24 @@
 //! Options that the user can provide via pyproject.toml.
 
-use ruff_macros::ConfigurationOptions;
 use rustc_hash::FxHashMap;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use ruff_macros::ConfigurationOptions;
+
+use crate::line_width::{LineLength, TabSize};
 use crate::rule_selector::RuleSelector;
 use crate::rules::{
     flake8_annotations, flake8_bandit, flake8_bugbear, flake8_builtins, flake8_comprehensions,
-    flake8_errmsg, flake8_gettext, flake8_implicit_str_concat, flake8_import_conventions,
-    flake8_pytest_style, flake8_quotes, flake8_self, flake8_tidy_imports, flake8_type_checking,
-    flake8_unused_arguments, isort, mccabe, pep8_naming, pycodestyle, pydocstyle, pylint,
-    pyupgrade, wemake_python_styleguide,
+    flake8_copyright, flake8_errmsg, flake8_gettext, flake8_implicit_str_concat,
+    flake8_import_conventions, flake8_pytest_style, flake8_quotes, flake8_self,
+    flake8_tidy_imports, flake8_type_checking, flake8_unused_arguments, isort, mccabe, pep8_naming,
+    pycodestyle, pydocstyle, pyflakes, pylint, pyupgrade, wemake_python_styleguide,
 };
 use crate::settings::types::{PythonVersion, SerializationFormat, Version};
 
-#[derive(
-    Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions, JsonSchema,
-)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Options {
     #[option(
         default = r#"[]"#,
@@ -71,7 +71,7 @@ pub struct Options {
     /// default expression matches `_`, `__`, and `_var`, but not `_var_`.
     pub dummy_variable_rgx: Option<String>,
     #[option(
-        default = r#"[".bzr", ".direnv", ".eggs", ".git", ".hg", ".mypy_cache", ".nox", ".pants.d", ".pytype", ".ruff_cache", ".svn", ".tox", ".venv", "__pypackages__", "_build", "buck-out", "build", "dist", "node_modules", "venv"]"#,
+        default = r#"[".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg", ".mypy_cache", ".nox", ".pants.d", ".pytype", ".ruff_cache", ".svn", ".tox", ".venv", "__pypackages__", "_build", "buck-out", "build", "dist", "node_modules", "venv"]"#,
         value_type = "list[str]",
         example = r#"
             exclude = [".venv"]
@@ -164,7 +164,7 @@ pub struct Options {
     ///
     /// This option has been **deprecated** in favor of `ignore`
     /// since its usage is now interchangeable with `ignore`.
-    #[schemars(skip)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub extend_ignore: Option<Vec<RuleSelector>>,
     #[option(
         default = "[]",
@@ -177,6 +177,24 @@ pub struct Options {
     /// A list of rule codes or prefixes to enable, in addition to those
     /// specified by `select`.
     pub extend_select: Option<Vec<RuleSelector>>,
+    #[option(
+        default = r#"[]"#,
+        value_type = "list[RuleSelector]",
+        example = r#"
+            # Enable autofix for flake8-bugbear (`B`), on top of any rules specified by `fixable`.
+            extend-fixable = ["B"]
+        "#
+    )]
+    /// A list of rule codes or prefixes to consider autofixable, in addition to those
+    /// specified by `fixable`.
+    pub extend_fixable: Option<Vec<RuleSelector>>,
+    /// A list of rule codes or prefixes to consider non-auto-fixable, in addition to those
+    /// specified by `unfixable`.
+    ///
+    /// This option has been **deprecated** in favor of `unfixable` since its usage is now
+    /// interchangeable with `unfixable`.
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub extend_unfixable: Option<Vec<RuleSelector>>,
     #[option(
         default = "[]",
         value_type = "list[str]",
@@ -199,7 +217,7 @@ pub struct Options {
     /// Like `fix`, but disables reporting on leftover violation. Implies `fix`.
     pub fix_only: Option<bool>,
     #[option(
-        default = r#"["A", "ANN", "ARG", "B", "BLE", "C", "COM", "D", "DTZ", "E", "EM", "ERA", "EXE", "F", "FBT", "G", "I", "ICN", "INP", "ISC", "N", "PD", "PGH", "PIE", "PL", "PT", "PTH", "Q", "RET", "RUF", "S", "SIM", "T", "TCH", "TID", "TRY", "UP", "W", "YTT"]"#,
+        default = r#"["ALL"]"#,
         value_type = "list[RuleSelector]",
         example = r#"
             # Only allow autofix behavior for `E` and `F` rules.
@@ -237,7 +255,7 @@ pub struct Options {
     /// respect these exclusions unequivocally.
     ///
     /// This is useful for [`pre-commit`](https://pre-commit.com/), which explicitly passes all
-    /// changed files to the [`ruff-pre-commit`](https://github.com/charliermarsh/ruff-pre-commit)
+    /// changed files to the [`ruff-pre-commit`](https://github.com/astral-sh/ruff-pre-commit)
     /// plugin, regardless of whether they're marked as excluded by Ruff's own
     /// settings.
     pub force_exclude: Option<bool>,
@@ -270,7 +288,7 @@ pub struct Options {
     /// re-exported with a redundant alias (e.g., `import os as os`).
     pub ignore_init_module_imports: Option<bool>,
     #[option(
-        default = r#"["*.py", "*.pyi"]"#,
+        default = r#"["*.py", "*.pyi", "**/pyproject.toml"]"#,
         value_type = "list[str]",
         example = r#"
             include = ["*.py"]
@@ -279,7 +297,9 @@ pub struct Options {
     /// A list of file patterns to include when linting.
     ///
     /// Inclusion are based on globs, and should be single-path patterns, like
-    /// `*.pyw`, to include any file with the `.pyw` extension.
+    /// `*.pyw`, to include any file with the `.pyw` extension. `pyproject.toml` is
+    /// included here not for configuration but because we lint whether e.g. the
+    /// `[project]` matches the schema.
     ///
     /// For more information on the glob syntax, refer to the [`globset` documentation](https://docs.rs/globset/latest/globset/#syntax).
     pub include: Option<Vec<String>>,
@@ -287,13 +307,22 @@ pub struct Options {
         default = "88",
         value_type = "int",
         example = r#"
-            # Allow lines to be as long as 120 characters.
-            line-length = 120
+        # Allow lines to be as long as 120 characters.
+        line-length = 120
         "#
     )]
     /// The line length to use when enforcing long-lines violations (like
     /// `E501`).
-    pub line_length: Option<usize>,
+    pub line_length: Option<LineLength>,
+    #[option(
+        default = "4",
+        value_type = "int",
+        example = r#"
+            tab_size = 8
+        "#
+    )]
+    /// The tabulation size to calculate line length.
+    pub tab_size: Option<TabSize>,
     #[option(
         default = "None",
         value_type = "str",
@@ -347,7 +376,7 @@ pub struct Options {
         default = "false",
         value_type = "bool",
         example = r#"
-            # By default, always enumerate fixed violations.
+            # Enumerate all fixed violations.
             show-fixes = true
         "#
     )]
@@ -381,11 +410,15 @@ pub struct Options {
     /// (e.g., `src = ["src"]`), such that when resolving imports,
     /// `my_package.foo` is considered a first-party import.
     ///
+    /// When omitted, the `src` directory will typically default to the
+    /// directory containing the nearest `pyproject.toml`, `ruff.toml`, or
+    /// `.ruff.toml` file (the "project root"), unless a configuration file
+    /// is explicitly provided (e.g., via the `--config` command-line flag).
+    ///
     /// This field supports globs. For example, if you have a series of Python
     /// packages in a `python_modules` directory, `src = ["python_modules/*"]`
-    /// would expand to incorporate all of the
-    /// packages in that directory. User home directory and environment
-    /// variables will also be expanded.
+    /// would expand to incorporate all of the packages in that directory. User
+    /// home directory and environment variables will also be expanded.
     pub src: Option<Vec<String>>,
     #[option(
         default = r#"[]"#,
@@ -400,18 +433,19 @@ pub struct Options {
     pub namespace_packages: Option<Vec<String>>,
     #[option(
         default = r#""py310""#,
-        value_type = r#""py37" | "py38" | "py39" | "py310" | "py311""#,
+        value_type = r#""py37" | "py38" | "py39" | "py310" | "py311" | "py312""#,
         example = r#"
             # Always generate Python 3.7-compatible code.
             target-version = "py37"
         "#
     )]
-    /// The Python version to target, e.g., when considering automatic code
-    /// upgrades, like rewriting type annotations.
+    /// The minimum Python version to target, e.g., when considering automatic
+    /// code upgrades, like rewriting type annotations.
     ///
-    /// If omitted, the target version will be inferred from the
-    /// `project.requires-python` field in the relevant `pyproject.toml`
-    /// (e.g., `requires-python = ">=3.8"`), if present.
+    /// If omitted, and Ruff is configured via a `pyproject.toml` file, the
+    /// target version will be inferred from its `project.requires-python`
+    /// field (e.g., `requires-python = ">=3.8"`). If Ruff is configured via
+    /// `ruff.toml` or `.ruff.toml`, no such inference will be performed.
     pub target_version: Option<PythonVersion>,
     #[option(
         default = r#"["TODO", "FIXME", "XXX"]"#,
@@ -448,14 +482,6 @@ pub struct Options {
     )]
     /// A list of rule codes or prefixes to consider non-autofix-able.
     pub unfixable: Option<Vec<RuleSelector>>,
-    #[option(
-        default = "false",
-        value_type = "bool",
-        example = "update-check = true"
-    )]
-    /// Enable or disable automatic update checks (overridden by the
-    /// `--update-check` and `--no-update-check` command-line flags).
-    pub update_check: Option<bool>,
     #[option_group]
     /// Options for the `flake8-annotations` plugin.
     pub flake8_annotations: Option<flake8_annotations::settings::Options>,
@@ -471,6 +497,9 @@ pub struct Options {
     #[option_group]
     /// Options for the `flake8-comprehensions` plugin.
     pub flake8_comprehensions: Option<flake8_comprehensions::settings::Options>,
+    #[option_group]
+    /// Options for the `copyright` plugin.
+    pub flake8_copyright: Option<flake8_copyright::settings::Options>,
     #[option_group]
     /// Options for the `flake8-errmsg` plugin.
     pub flake8_errmsg: Option<flake8_errmsg::settings::Options>,
@@ -517,6 +546,9 @@ pub struct Options {
     /// Options for the `pydocstyle` plugin.
     pub pydocstyle: Option<pydocstyle::settings::Options>,
     #[option_group]
+    /// Options for the `pyflakes` plugin.
+    pub pyflakes: Option<pyflakes::settings::Options>,
+    #[option_group]
     /// Options for the `pylint` plugin.
     pub pylint: Option<pylint::settings::Options>,
     #[option_group]
@@ -539,4 +571,16 @@ pub struct Options {
     /// A list of mappings from file pattern to rule codes or prefixes to
     /// exclude, when considering any matching files.
     pub per_file_ignores: Option<FxHashMap<String, Vec<RuleSelector>>>,
+    #[option(
+        default = "{}",
+        value_type = "dict[str, list[RuleSelector]]",
+        example = r#"
+            # Also ignore `E401` in all `__init__.py` files.
+            [tool.ruff.extend-per-file-ignores]
+            "__init__.py" = ["E402"]
+        "#
+    )]
+    /// A list of mappings from file pattern to rule codes or prefixes to
+    /// exclude, in addition to any rules excluded by `per-file-ignores`.
+    pub extend_per_file_ignores: Option<FxHashMap<String, Vec<RuleSelector>>>,
 }

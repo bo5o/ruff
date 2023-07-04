@@ -1,14 +1,32 @@
-use log::error;
-use rustpython_parser::ast::{Expr, ExprKind, Stmt};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
-use crate::autofix::actions;
+use crate::autofix;
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for the use of `__metaclass__ = type` in class definitions.
+///
+/// ## Why is this bad?
+/// Since Python 3, `__metaclass__ = type` is implied and can thus be omitted.
+///
+/// ## Example
+/// ```python
+/// class Foo:
+///     __metaclass__ = type
+/// ```
+///
+/// Use instead:
+/// ```python
+/// class Foo:
+///     ...
+/// ```
+///
+/// ## References
+/// - [PEP 3115](https://www.python.org/dev/peps/pep-3115/)
 #[violation]
 pub struct UselessMetaclassType;
 
@@ -23,51 +41,35 @@ impl AlwaysAutofixableViolation for UselessMetaclassType {
     }
 }
 
-fn rule(targets: &[Expr], value: &Expr, location: Range) -> Option<Diagnostic> {
+/// UP001
+pub(crate) fn useless_metaclass_type(
+    checker: &mut Checker,
+    stmt: &Stmt,
+    value: &Expr,
+    targets: &[Expr],
+) {
     if targets.len() != 1 {
-        return None;
+        return;
     }
-    let ExprKind::Name { id, .. } = targets.first().map(|expr| &expr.node).unwrap() else {
-        return None;
+    let Expr::Name(ast::ExprName { id, .. }) = targets.first().unwrap() else {
+        return;
     };
     if id != "__metaclass__" {
-        return None;
+        return;
     }
-    let ExprKind::Name { id, .. } = &value.node else {
-        return None;
+    let Expr::Name(ast::ExprName { id, .. }) = value else {
+        return;
     };
     if id != "type" {
-        return None;
+        return;
     }
-    Some(Diagnostic::new(UselessMetaclassType, location))
-}
 
-/// UP001
-pub fn useless_metaclass_type(checker: &mut Checker, stmt: &Stmt, value: &Expr, targets: &[Expr]) {
-    let Some(mut diagnostic) =
-        rule(targets, value, Range::from(stmt)) else {
-            return;
-        };
+    let mut diagnostic = Diagnostic::new(UselessMetaclassType, stmt.range());
     if checker.patch(diagnostic.kind.rule()) {
-        let deleted: Vec<&Stmt> = checker.deletions.iter().map(Into::into).collect();
-        let defined_by = checker.ctx.current_stmt();
-        let defined_in = checker.ctx.current_stmt_parent();
-        match actions::delete_stmt(
-            defined_by.into(),
-            defined_in.map(Into::into),
-            &deleted,
-            checker.locator,
-            checker.indexer,
-            checker.stylist,
-        ) {
-            Ok(fix) => {
-                if fix.is_deletion() || fix.content() == Some("pass") {
-                    checker.deletions.insert(*defined_by);
-                }
-                diagnostic.set_fix(fix);
-            }
-            Err(e) => error!("Failed to fix remove metaclass type: {e}"),
-        }
+        let stmt = checker.semantic().stmt();
+        let parent = checker.semantic().stmt_parent();
+        let edit = autofix::edits::delete_stmt(stmt, parent, checker.locator, checker.indexer);
+        diagnostic.set_fix(Fix::automatic(edit).isolate(checker.isolation(parent)));
     }
     checker.diagnostics.push(diagnostic);
 }

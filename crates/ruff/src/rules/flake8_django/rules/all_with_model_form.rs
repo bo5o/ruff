@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::rules::flake8_django::rules::helpers::is_model_form;
@@ -48,46 +47,47 @@ impl Violation for DjangoAllWithModelForm {
 }
 
 /// DJ007
-pub fn all_with_model_form(checker: &Checker, bases: &[Expr], body: &[Stmt]) -> Option<Diagnostic> {
-    if !bases.iter().any(|base| is_model_form(&checker.ctx, base)) {
+pub(crate) fn all_with_model_form(
+    checker: &Checker,
+    bases: &[Expr],
+    body: &[Stmt],
+) -> Option<Diagnostic> {
+    if !bases
+        .iter()
+        .any(|base| is_model_form(base, checker.semantic()))
+    {
         return None;
     }
     for element in body.iter() {
-        let StmtKind::ClassDef { name, body, .. } = &element.node else {
+        let Stmt::ClassDef(ast::StmtClassDef { name, body, .. }) = element else {
             continue;
         };
         if name != "Meta" {
             continue;
         }
         for element in body.iter() {
-            let StmtKind::Assign { targets, value, .. } = &element.node else {
+            let Stmt::Assign(ast::StmtAssign { targets, value, .. }) = element else {
                 continue;
             };
             for target in targets.iter() {
-                let ExprKind::Name { id, .. } = &target.node else {
+                let Expr::Name(ast::ExprName { id, .. }) = target else {
                     continue;
                 };
                 if id != "fields" {
                     continue;
                 }
-                let ExprKind::Constant { value, .. } = &value.node else {
+                let Expr::Constant(ast::ExprConstant { value, .. }) = value.as_ref() else {
                     continue;
                 };
-                match &value {
+                match value {
                     Constant::Str(s) => {
                         if s == "__all__" {
-                            return Some(Diagnostic::new(
-                                DjangoAllWithModelForm,
-                                Range::from(element),
-                            ));
+                            return Some(Diagnostic::new(DjangoAllWithModelForm, element.range()));
                         }
                     }
                     Constant::Bytes(b) => {
                         if b == "__all__".as_bytes() {
-                            return Some(Diagnostic::new(
-                                DjangoAllWithModelForm,
-                                Range::from(element),
-                            ));
+                            return Some(Diagnostic::new(DjangoAllWithModelForm, element.range()));
                         }
                     }
                     _ => (),

@@ -2,14 +2,51 @@ use rustpython_parser::ast::{Arguments, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::identifier_range;
+use ruff_python_ast::identifier::Identifier;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for function definitions that include too many arguments.
+///
+/// By default, this rule allows up to five arguments, as configured by the
+/// `pylint.max-args` option.
+///
+/// ## Why is this bad?
+/// Functions with many arguments are harder to understand, maintain, and call.
+/// Consider refactoring functions with many arguments into smaller functions
+/// with fewer arguments, or using objects to group related arguments.
+///
+/// ## Example
+/// ```python
+/// def calculate_position(x_pos, y_pos, z_pos, x_vel, y_vel, z_vel, time):
+///     new_x = x_pos + x_vel * time
+///     new_y = y_pos + y_vel * time
+///     new_z = z_pos + z_vel * time
+///     return new_x, new_y, new_z
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from typing import NamedTuple
+///
+///
+/// class Vector(NamedTuple):
+///     x: float
+///     y: float
+///     z: float
+///
+///
+/// def calculate_position(pos: Vector, vel: Vector, time: float) -> Vector:
+///     return Vector(*(p + v * time for p, v in zip(pos, vel)))
+/// ```
+///
+/// ## Options
+/// - `pylint.max-args`
 #[violation]
 pub struct TooManyArguments {
-    pub c_args: usize,
-    pub max_args: usize,
+    c_args: usize,
+    max_args: usize,
 }
 
 impl Violation for TooManyArguments {
@@ -21,19 +58,21 @@ impl Violation for TooManyArguments {
 }
 
 /// PLR0913
-pub fn too_many_arguments(checker: &mut Checker, args: &Arguments, stmt: &Stmt) {
-    let num_args = args
+pub(crate) fn too_many_arguments(checker: &mut Checker, arguments: &Arguments, stmt: &Stmt) {
+    let num_arguments = arguments
         .args
         .iter()
-        .filter(|arg| !checker.settings.dummy_variable_rgx.is_match(&arg.node.arg))
+        .chain(&arguments.kwonlyargs)
+        .chain(&arguments.posonlyargs)
+        .filter(|arg| !checker.settings.dummy_variable_rgx.is_match(&arg.def.arg))
         .count();
-    if num_args > checker.settings.pylint.max_args {
+    if num_arguments > checker.settings.pylint.max_args {
         checker.diagnostics.push(Diagnostic::new(
             TooManyArguments {
-                c_args: num_args,
+                c_args: num_arguments,
                 max_args: checker.settings.pylint.max_args,
             },
-            identifier_range(stmt, checker.locator),
+            stmt.identifier(),
         ));
     }
 }

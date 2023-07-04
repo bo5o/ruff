@@ -35,7 +35,7 @@ pub trait MemoizeFormat<Context> {
     ///         let value = self.value.get();
     ///         self.value.set(value + 1);
     ///
-    ///         write!(f, [dynamic_text(&std::format!("Formatted {value} times."), TextSize::from(0))])
+    ///         write!(f, [dynamic_text(&std::format!("Formatted {value} times."), None)])
     ///     }
     /// }
     ///
@@ -57,7 +57,6 @@ pub trait MemoizeFormat<Context> {
     /// # Ok(())
     /// # }
     /// ```
-    ///
     fn memoized(self) -> Memoized<Self, Context>
     where
         Self: Sized + Format<Context>,
@@ -114,7 +113,7 @@ where
     ///         write!(f, [
     ///             text("Count:"),
     ///             space(),
-    ///             dynamic_text(&std::format!("{current}"), TextSize::default()),
+    ///             dynamic_text(&std::format!("{current}"), None),
     ///             hard_line_break()
     ///         ])?;
     ///
@@ -142,7 +141,6 @@ where
     /// assert_eq!("Counter:\n\tCount: 0\nCount: 0\n", formatted.print()?.as_code());
     /// # Ok(())
     /// # }
-    ///
     /// ```
     pub fn inspect(&mut self, f: &mut Formatter<Context>) -> FormatResult<&[FormatElement]> {
         let result = self

@@ -1,10 +1,9 @@
 use itertools::Itertools;
-use rustpython_parser::ast::{Alias, AliasData, Stmt};
+use rustpython_parser::ast::{Alias, Ranged, Stmt};
 
-use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Violation};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::source_code::{Locator, Stylist};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::whitespace::indentation;
 
 use crate::checkers::ast::Checker;
@@ -36,6 +35,29 @@ enum Deprecation {
     WithoutRename(WithoutRename),
 }
 
+/// ## What it does
+/// Checks for uses of deprecated imports based on the minimum supported
+/// Python version.
+///
+/// ## Why is this bad?
+/// Deprecated imports may be removed in future versions of Python, and
+/// should be replaced with their new equivalents.
+///
+/// Note that, in some cases, it may be preferable to continue importing
+/// members from `typing_extensions` even after they're added to the Python
+/// standard library, as `typing_extensions` can backport bugfixes and
+/// optimizations from later Python versions. This rule thus avoids flagging
+/// imports from `typing_extensions` in such cases.
+///
+/// ## Example
+/// ```python
+/// from collections import Sequence
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from collections.abc import Sequence
+/// ```
 #[violation]
 pub struct DeprecatedImport {
     deprecation: Deprecation,
@@ -63,29 +85,22 @@ impl Violation for DeprecatedImport {
         }
     }
 
-    fn autofix_title_formatter(&self) -> Option<fn(&Self) -> String> {
-        if let Deprecation::WithoutRename(WithoutRename { fixable, .. }) = self.deprecation {
-            fixable.then_some(|DeprecatedImport { deprecation }| {
-                let Deprecation::WithoutRename(WithoutRename { target, .. }) = deprecation else {
-                    unreachable!();
-                };
-                format!("Import from `{target}`")
-            })
+    fn autofix_title(&self) -> Option<String> {
+        if let Deprecation::WithoutRename(WithoutRename { target, .. }) = &self.deprecation {
+            Some(format!("Import from `{target}`"))
         } else {
             None
         }
     }
 }
 
-// A list of modules that may involve import rewrites.
-const RELEVANT_MODULES: &[&str] = &[
-    "collections",
-    "pipes",
-    "mypy_extensions",
-    "typing_extensions",
-    "typing",
-    "typing.re",
-];
+/// Returns `true` if the module may contain deprecated imports.
+fn is_relevant_module(module: &str) -> bool {
+    matches!(
+        module,
+        "collections" | "pipes" | "mypy_extensions" | "typing_extensions" | "typing" | "typing.re"
+    )
+}
 
 // Members of `collections` that were moved to `collections.abc`.
 const COLLECTIONS_TO_ABC: &[&str] = &[
@@ -128,10 +143,12 @@ const TYPING_EXTENSIONS_TO_TYPING: &[&str] = &[
     "ContextManager",
     "Coroutine",
     "DefaultDict",
-    "NewType",
     "TYPE_CHECKING",
     "Text",
     "Type",
+    // Introduced in Python 3.5.2, but `typing_extensions` contains backported bugfixes and
+    // optimizations,
+    // "NewType",
 ];
 
 // Python 3.7+
@@ -157,11 +174,13 @@ const MYPY_EXTENSIONS_TO_TYPING_38: &[&str] = &["TypedDict"];
 // Members of `typing_extensions` that were moved to `typing`.
 const TYPING_EXTENSIONS_TO_TYPING_38: &[&str] = &[
     "Final",
-    "Literal",
     "OrderedDict",
-    "Protocol",
-    "SupportsIndex",
     "runtime_checkable",
+    // Introduced in Python 3.8, but `typing_extensions` contains backported bugfixes and
+    // optimizations.
+    // "Literal",
+    // "Protocol",
+    // "SupportsIndex",
 ];
 
 // Python 3.9+
@@ -232,6 +251,8 @@ const TYPING_TO_COLLECTIONS_ABC_310: &[&str] = &["Callable"];
 // Members of `typing_extensions` that were moved to `typing`.
 const TYPING_EXTENSIONS_TO_TYPING_310: &[&str] = &[
     "Concatenate",
+    "Literal",
+    "NewType",
     "ParamSpecArgs",
     "ParamSpecKwargs",
     "TypeAlias",
@@ -247,27 +268,32 @@ const TYPING_EXTENSIONS_TO_TYPING_310: &[&str] = &[
 const TYPING_EXTENSIONS_TO_TYPING_311: &[&str] = &[
     "Any",
     "LiteralString",
-    "NamedTuple",
     "Never",
     "NotRequired",
     "Required",
     "Self",
-    "TypedDict",
-    "Unpack",
     "assert_never",
     "assert_type",
     "clear_overloads",
-    "dataclass_transform",
     "final",
     "get_overloads",
     "overload",
     "reveal_type",
 ];
 
+// Python 3.12+
+
+// Members of `typing_extensions` that were moved to `typing`.
+const TYPING_EXTENSIONS_TO_TYPING_312: &[&str] = &[
+    // Introduced in Python 3.11, but `typing_extensions` backports the `frozen_default` argument,
+    // which was introduced in Python 3.12.
+    "dataclass_transform",
+];
+
 struct ImportReplacer<'a> {
     stmt: &'a Stmt,
     module: &'a str,
-    members: &'a [AliasData],
+    members: &'a [Alias],
     locator: &'a Locator<'a>,
     stylist: &'a Stylist<'a>,
     version: PythonVersion,
@@ -277,7 +303,7 @@ impl<'a> ImportReplacer<'a> {
     const fn new(
         stmt: &'a Stmt,
         module: &'a str,
-        members: &'a [AliasData],
+        members: &'a [Alias],
         locator: &'a Locator<'a>,
         stylist: &'a Stylist<'a>,
         version: PythonVersion,
@@ -299,7 +325,7 @@ impl<'a> ImportReplacer<'a> {
             if self.version >= PythonVersion::Py39 {
                 for member in self.members {
                     if let Some(target) = TYPING_TO_RENAME_PY39.iter().find_map(|(name, target)| {
-                        if member.name == *name {
+                        if &member.name == *name {
                             Some(*target)
                         } else {
                             None
@@ -347,6 +373,9 @@ impl<'a> ImportReplacer<'a> {
                 }
                 if self.version >= PythonVersion::Py311 {
                     typing_extensions_to_typing.extend(TYPING_EXTENSIONS_TO_TYPING_311);
+                }
+                if self.version >= PythonVersion::Py312 {
+                    typing_extensions_to_typing.extend(TYPING_EXTENSIONS_TO_TYPING_312);
                 }
                 if let Some(operation) = self.try_replace(&typing_extensions_to_typing, "typing") {
                     operations.push(operation);
@@ -442,7 +471,7 @@ impl<'a> ImportReplacer<'a> {
             // line, we can't add a statement after it. For example, if we have
             // `if True: import foo`, we can't add a statement to the next line.
             let Some(indentation) = indentation else {
-                 let operation = WithoutRename {
+                let operation = WithoutRename {
                     target: target.to_string(),
                     members: matched_names
                         .iter()
@@ -456,7 +485,7 @@ impl<'a> ImportReplacer<'a> {
 
             let matched = ImportReplacer::format_import_from(&matched_names, target);
             let unmatched = fixes::remove_import_members(
-                self.locator.slice(self.stmt),
+                self.locator.slice(self.stmt.range()),
                 &matched_names
                     .iter()
                     .map(|name| name.name.as_str())
@@ -481,7 +510,7 @@ impl<'a> ImportReplacer<'a> {
     }
 
     /// Partitions imports into matched and unmatched names.
-    fn partition_imports(&self, candidates: &[&str]) -> (Vec<&AliasData>, Vec<&AliasData>) {
+    fn partition_imports(&self, candidates: &[&str]) -> (Vec<&Alias>, Vec<&Alias>) {
         let mut matched_names = vec![];
         let mut unmatched_names = vec![];
         for name in self.members {
@@ -496,44 +525,44 @@ impl<'a> ImportReplacer<'a> {
 
     /// Converts a list of names and a module into an `import from`-style
     /// import.
-    fn format_import_from(names: &[&AliasData], module: &str) -> String {
+    fn format_import_from(names: &[&Alias], module: &str) -> String {
         // Construct the whitespace strings.
         // Generate the formatted names.
-        let full_names: String = names
+        let qualified_names: String = names
             .iter()
             .map(|name| match &name.asname {
-                Some(asname) => format!("{} as {asname}", name.name),
+                Some(asname) => format!("{} as {}", name.name, asname),
                 None => format!("{}", name.name),
             })
             .join(", ");
-        format!("from {module} import {full_names}")
+        format!("from {module} import {qualified_names}")
     }
 }
 
 /// UP035
-pub fn deprecated_import(
+pub(crate) fn deprecated_import(
     checker: &mut Checker,
     stmt: &Stmt,
     names: &[Alias],
     module: Option<&str>,
-    level: Option<usize>,
+    level: Option<u32>,
 ) {
     // Avoid relative and star imports.
     if level.map_or(false, |level| level > 0) {
         return;
     }
-    if names.first().map_or(false, |name| name.node.name == "*") {
+    if names.first().map_or(false, |name| &name.name == "*") {
         return;
     }
     let Some(module) = module else {
         return;
     };
 
-    if !RELEVANT_MODULES.contains(&module) {
+    if !is_relevant_module(module) {
         return;
     }
 
-    let members: Vec<AliasData> = names.iter().map(|alias| alias.node.clone()).collect();
+    let members: Vec<Alias> = names.iter().map(Clone::clone).collect();
     let fixer = ImportReplacer::new(
         stmt,
         module,
@@ -548,15 +577,14 @@ pub fn deprecated_import(
             DeprecatedImport {
                 deprecation: Deprecation::WithoutRename(operation),
             },
-            Range::from(stmt),
+            stmt.range(),
         );
         if checker.patch(Rule::DeprecatedImport) {
             if let Some(content) = fix {
-                diagnostic.set_fix(Edit::replacement(
+                diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                     content,
-                    stmt.location,
-                    stmt.end_location.unwrap(),
-                ));
+                    stmt.range(),
+                )));
             }
         }
         checker.diagnostics.push(diagnostic);
@@ -567,7 +595,7 @@ pub fn deprecated_import(
             DeprecatedImport {
                 deprecation: Deprecation::WithRename(operation),
             },
-            Range::from(stmt),
+            stmt.range(),
         );
         checker.diagnostics.push(diagnostic);
     }

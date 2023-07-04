@@ -1,8 +1,9 @@
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword};
 
 use ruff_python_ast::call_path::collect_call_path;
+use ruff_python_ast::helpers::find_keyword;
 
-use crate::context::Context;
+use crate::model::SemanticModel;
 
 /// Return `true` if the given `Expr` is a potential logging call. Matches
 /// `logging.error`, `logger.error`, `self.logger.error`, etc., but not
@@ -16,10 +17,14 @@ use crate::context::Context;
 /// # This is detected to be a logger candidate
 /// bar.error()
 /// ```
-pub fn is_logger_candidate(context: &Context, func: &Expr) -> bool {
-    if let ExprKind::Attribute { value, .. } = &func.node {
-        let Some(call_path) = (if let Some(call_path) = context.resolve_call_path(value) {
-            if call_path.first().map_or(false, |module| *module == "logging") {
+pub fn is_logger_candidate(func: &Expr, semantic: &SemanticModel) -> bool {
+    if let Expr::Attribute(ast::ExprAttribute { value, .. }) = func {
+        let Some(call_path) = (if let Some(call_path) = semantic.resolve_call_path(value) {
+            if call_path
+                .first()
+                .map_or(false, |module| *module == "logging")
+                || call_path.as_slice() == ["flask", "current_app", "logger"]
+            {
                 Some(call_path)
             } else {
                 None
@@ -36,4 +41,32 @@ pub fn is_logger_candidate(context: &Context, func: &Expr) -> bool {
         }
     }
     false
+}
+
+/// If the keywords to a  logging call contain `exc_info=True` or `exc_info=sys.exc_info()`,
+/// return the `Keyword` for `exc_info`.
+pub fn exc_info<'a>(keywords: &'a [Keyword], semantic: &SemanticModel) -> Option<&'a Keyword> {
+    let exc_info = find_keyword(keywords, "exc_info")?;
+
+    // Ex) `logging.error("...", exc_info=True)`
+    if matches!(
+        exc_info.value,
+        Expr::Constant(ast::ExprConstant {
+            value: Constant::Bool(true),
+            ..
+        })
+    ) {
+        return Some(exc_info);
+    }
+
+    // Ex) `logging.error("...", exc_info=sys.exc_info())`
+    if let Expr::Call(ast::ExprCall { func, .. }) = &exc_info.value {
+        if semantic.resolve_call_path(func).map_or(false, |call_path| {
+            matches!(call_path.as_slice(), ["sys", "exc_info"])
+        }) {
+            return Some(exc_info);
+        }
+    }
+
+    None
 }

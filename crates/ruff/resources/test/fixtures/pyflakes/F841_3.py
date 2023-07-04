@@ -84,6 +84,11 @@ def f():
 
 
 def f():
+    with (Nested(m)) as (cm):
+        pass
+
+
+def f():
     toplevel = tt = lexer.get_token()
     if not tt:
         break
@@ -103,3 +108,42 @@ def f():
 
 def f():
     toplevel = tt = 1
+
+
+def f(provided: int) -> int:
+    match provided:
+        case [_, *x]:
+            pass
+
+
+def f(provided: int) -> int:
+    match provided:
+        case x:
+            pass
+
+
+def f(provided: int) -> int:
+    match provided:
+        case Foo(bar) as x:
+            pass
+
+
+def f(provided: int) -> int:
+    match provided:
+        case {"foo": 0, **x}:
+            pass
+
+
+def f(provided: int) -> int:
+    match provided:
+        case {**x}:
+            pass
+
+
+global CONSTANT
+
+
+def f() -> None:
+    global CONSTANT
+    CONSTANT = 1
+    CONSTANT = 2

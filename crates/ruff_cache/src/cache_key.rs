@@ -1,11 +1,13 @@
-use itertools::Itertools;
-use regex::Regex;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+
+use glob::Pattern;
+use itertools::Itertools;
+use regex::Regex;
 
 #[derive(Clone, Debug, Default)]
 pub struct CacheKeyHasher {
@@ -22,6 +24,7 @@ impl CacheKeyHasher {
 
 impl Deref for CacheKeyHasher {
     type Target = DefaultHasher;
+
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -90,7 +93,7 @@ impl DerefMut for CacheKeyHasher {
 /// * Cache keys must be deterministic where hash keys do not have this constraint. That's why pointers don't implement [`CacheKey`] but they implement [`Hash`].
 /// * Ideally, cache keys are portable
 ///
-/// [`Hash`](std::hash::Hash)
+/// [`Hash`](Hash)
 pub trait CacheKey {
     fn cache_key(&self, state: &mut CacheKeyHasher);
 
@@ -370,6 +373,12 @@ where
 }
 
 impl CacheKey for Regex {
+    fn cache_key(&self, state: &mut CacheKeyHasher) {
+        self.as_str().cache_key(state);
+    }
+}
+
+impl CacheKey for Pattern {
     fn cache_key(&self, state: &mut CacheKeyHasher) {
         self.as_str().cache_key(state);
     }

@@ -1,3 +1,8 @@
+"""
+Violation:
+
+Checks for `raise` statements within `try` blocks.
+"""
 class MyException(Exception):
     pass
 
@@ -45,3 +50,10 @@ def good():
         logger.exception("a failed")
     except Exception:
         logger.exception("something failed")
+
+
+def fine():
+    try:
+        a = process()  # This throws the exception now
+    finally:
+        print("finally")

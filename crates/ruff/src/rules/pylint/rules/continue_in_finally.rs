@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Stmt, StmtKind};
+use rustpython_parser::ast::{self, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -17,22 +16,25 @@ use crate::checkers::ast::Checker;
 /// ## Example
 /// ```python
 /// while True:
-///  try:
-///     pass
-///  finally:
-///     continue
+///     try:
+///         pass
+///     finally:
+///         continue
 /// ```
 ///
 /// Use instead:
 /// ```python
 /// while True:
-///  try:
-///     pass
-///  except Exception:
-///     pass
-///  else:
-///     continue
+///     try:
+///         pass
+///     except Exception:
+///         pass
+///     else:
+///         continue
 /// ```
+///
+/// ## Options
+/// - `target-version`
 #[violation]
 pub struct ContinueInFinally;
 
@@ -45,26 +47,27 @@ impl Violation for ContinueInFinally {
 
 fn traverse_body(checker: &mut Checker, body: &[Stmt]) {
     for stmt in body {
-        if matches!(stmt.node, StmtKind::Continue { .. }) {
+        if stmt.is_continue_stmt() {
             checker
                 .diagnostics
-                .push(Diagnostic::new(ContinueInFinally, Range::from(stmt)));
+                .push(Diagnostic::new(ContinueInFinally, stmt.range()));
         }
 
-        match &stmt.node {
-            StmtKind::If { body, orelse, .. }
-            | StmtKind::Try { body, orelse, .. }
-            | StmtKind::TryStar { body, orelse, .. } => {
+        match stmt {
+            Stmt::If(ast::StmtIf { body, orelse, .. })
+            | Stmt::Try(ast::StmtTry { body, orelse, .. })
+            | Stmt::TryStar(ast::StmtTryStar { body, orelse, .. }) => {
                 traverse_body(checker, body);
                 traverse_body(checker, orelse);
             }
-            StmtKind::For { orelse, .. }
-            | StmtKind::AsyncFor { orelse, .. }
-            | StmtKind::While { orelse, .. } => traverse_body(checker, orelse),
-            StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
+            Stmt::For(ast::StmtFor { orelse, .. })
+            | Stmt::AsyncFor(ast::StmtAsyncFor { orelse, .. })
+            | Stmt::While(ast::StmtWhile { orelse, .. }) => traverse_body(checker, orelse),
+            Stmt::With(ast::StmtWith { body, .. })
+            | Stmt::AsyncWith(ast::StmtAsyncWith { body, .. }) => {
                 traverse_body(checker, body);
             }
-            StmtKind::Match { cases, .. } => {
+            Stmt::Match(ast::StmtMatch { cases, .. }) => {
                 for case in cases {
                     traverse_body(checker, &case.body);
                 }
@@ -75,6 +78,6 @@ fn traverse_body(checker: &mut Checker, body: &[Stmt]) {
 }
 
 /// PLE0116
-pub fn continue_in_finally(checker: &mut Checker, body: &[Stmt]) {
+pub(crate) fn continue_in_finally(checker: &mut Checker, body: &[Stmt]) {
     traverse_body(checker, body);
 }

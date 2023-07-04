@@ -1,15 +1,14 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::helpers::SimpleCallArgs;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
 #[violation]
 pub struct Jinja2AutoescapeFalse {
-    pub value: bool,
+    value: bool,
 }
 
 impl Violation for Jinja2AutoescapeFalse {
@@ -31,46 +30,46 @@ impl Violation for Jinja2AutoescapeFalse {
 }
 
 /// S701
-pub fn jinja2_autoescape_false(
+pub(crate) fn jinja2_autoescape_false(
     checker: &mut Checker,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
     if checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["jinja2", "Environment"]
+            matches!(call_path.as_slice(), ["jinja2", "Environment"])
         })
     {
         let call_args = SimpleCallArgs::new(args, keywords);
 
         if let Some(autoescape_arg) = call_args.keyword_argument("autoescape") {
-            match &autoescape_arg.node {
-                ExprKind::Constant {
+            match autoescape_arg {
+                Expr::Constant(ast::ExprConstant {
                     value: Constant::Bool(true),
                     ..
-                } => (),
-                ExprKind::Call { func, .. } => {
-                    if let ExprKind::Name { id, .. } = &func.node {
-                        if id.as_str() != "select_autoescape" {
+                }) => (),
+                Expr::Call(ast::ExprCall { func, .. }) => {
+                    if let Expr::Name(ast::ExprName { id, .. }) = func.as_ref() {
+                        if id != "select_autoescape" {
                             checker.diagnostics.push(Diagnostic::new(
                                 Jinja2AutoescapeFalse { value: true },
-                                Range::from(autoescape_arg),
+                                autoescape_arg.range(),
                             ));
                         }
                     }
                 }
                 _ => checker.diagnostics.push(Diagnostic::new(
                     Jinja2AutoescapeFalse { value: true },
-                    Range::from(autoescape_arg),
+                    autoescape_arg.range(),
                 )),
             }
         } else {
             checker.diagnostics.push(Diagnostic::new(
                 Jinja2AutoescapeFalse { value: false },
-                Range::from(func),
+                func.range(),
             ));
         }
     }

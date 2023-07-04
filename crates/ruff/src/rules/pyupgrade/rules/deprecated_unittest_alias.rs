@@ -1,18 +1,47 @@
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Expr, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for uses of deprecated methods from the `unittest` module.
+///
+/// ## Why is this bad?
+/// The `unittest` module has deprecated aliases for some of its methods.
+/// The aliases may be removed in future versions of Python. Instead,
+/// use their non-deprecated counterparts.
+///
+/// ## Example
+/// ```python
+/// from unittest import TestCase
+///
+///
+/// class SomeTest(TestCase):
+///     def test_something(self):
+///         self.assertEquals(1, 1)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from unittest import TestCase
+///
+///
+/// class SomeTest(TestCase):
+///     def test_something(self):
+///         self.assertEqual(1, 1)
+/// ```
+///
+/// ## References
+/// - [Python documentation: Deprecated aliases](https://docs.python.org/3/library/unittest.html#deprecated-aliases)
 #[violation]
 pub struct DeprecatedUnittestAlias {
-    pub alias: String,
-    pub target: String,
+    alias: String,
+    target: String,
 }
 
 impl AlwaysAutofixableViolation for DeprecatedUnittestAlias {
@@ -49,14 +78,14 @@ static DEPRECATED_ALIASES: Lazy<FxHashMap<&'static str, &'static str>> = Lazy::n
 });
 
 /// UP005
-pub fn deprecated_unittest_alias(checker: &mut Checker, expr: &Expr) {
-    let ExprKind::Attribute { value, attr, .. } = &expr.node else {
+pub(crate) fn deprecated_unittest_alias(checker: &mut Checker, expr: &Expr) {
+    let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = expr else {
         return;
     };
-    let Some(&target) = DEPRECATED_ALIASES.get(attr.as_str()) else {
+    let Some(target) = DEPRECATED_ALIASES.get(attr.as_str()) else {
         return;
     };
-    let ExprKind::Name { id, .. } = &value.node else {
+    let Expr::Name(ast::ExprName { id, .. }) = value.as_ref() else {
         return;
     };
     if id != "self" {
@@ -65,16 +94,15 @@ pub fn deprecated_unittest_alias(checker: &mut Checker, expr: &Expr) {
     let mut diagnostic = Diagnostic::new(
         DeprecatedUnittestAlias {
             alias: attr.to_string(),
-            target: target.to_string(),
+            target: (*target).to_string(),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
+        diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
             format!("self.{target}"),
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+            expr.range(),
+        )));
     }
     checker.diagnostics.push(diagnostic);
 }

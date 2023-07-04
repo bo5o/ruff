@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword, Operator};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword, Operator, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -40,63 +39,68 @@ impl Violation for InvalidEnvvarDefault {
 fn is_valid_default(expr: &Expr) -> bool {
     // We can't infer the types of these defaults, so assume they're valid.
     if matches!(
-        expr.node,
-        ExprKind::Name { .. }
-            | ExprKind::Attribute { .. }
-            | ExprKind::Subscript { .. }
-            | ExprKind::Call { .. }
+        expr,
+        Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_) | Expr::Call(_)
     ) {
         return true;
     }
 
     // Allow string concatenation.
-    if let ExprKind::BinOp {
+    if let Expr::BinOp(ast::ExprBinOp {
         left,
         right,
         op: Operator::Add,
-    } = &expr.node
+        range: _,
+    }) = expr
     {
         return is_valid_default(left) && is_valid_default(right);
     }
 
     // Allow string formatting.
-    if let ExprKind::BinOp {
+    if let Expr::BinOp(ast::ExprBinOp {
         left,
         op: Operator::Mod,
         ..
-    } = &expr.node
+    }) = expr
     {
         return is_valid_default(left);
     }
 
     // Otherwise, the default must be a string or `None`.
     matches!(
-        expr.node,
-        ExprKind::Constant {
+        expr,
+        Expr::Constant(ast::ExprConstant {
             value: Constant::Str { .. } | Constant::None { .. },
             ..
-        } | ExprKind::JoinedStr { .. }
+        }) | Expr::JoinedStr(_)
     )
 }
 
 /// PLW1508
-pub fn invalid_envvar_default(
+pub(crate) fn invalid_envvar_default(
     checker: &mut Checker,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
     if checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
-        .map_or(false, |call_path| call_path.as_slice() == ["os", "getenv"])
+        .map_or(false, |call_path| {
+            matches!(call_path.as_slice(), ["os", "getenv"])
+        })
     {
         // Find the `default` argument, if it exists.
         let Some(expr) = args.get(1).or_else(|| {
             keywords
                 .iter()
-                .find(|keyword| keyword.node.arg.as_ref().map_or(false, |arg| arg == "default"))
-                .map(|keyword| &keyword.node.value)
+                .find(|keyword| {
+                    keyword
+                        .arg
+                        .as_ref()
+                        .map_or(false, |arg| arg.as_str() == "default")
+                })
+                .map(|keyword| &keyword.value)
         }) else {
             return;
         };
@@ -104,7 +108,7 @@ pub fn invalid_envvar_default(
         if !is_valid_default(expr) {
             checker
                 .diagnostics
-                .push(Diagnostic::new(InvalidEnvvarDefault, Range::from(expr)));
+                .push(Diagnostic::new(InvalidEnvvarDefault, expr.range()));
         }
     }
 }

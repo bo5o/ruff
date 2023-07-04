@@ -1,15 +1,48 @@
 use std::fmt;
 
 use rustc_hash::FxHashSet;
-use rustpython_parser::ast::{Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::settings::types::PythonVersion;
 
+/// ## What it does
+/// Checks duplicate characters in `str#strip` calls.
+///
+/// ## Why is this bad?
+/// All characters in `str#strip` calls are removed from both the leading and
+/// trailing ends of the string. Including duplicate characters in the call
+/// is redundant and often indicative of a mistake.
+///
+/// In Python 3.9 and later, you can use `str#removeprefix` and
+/// `str#removesuffix` to remove an exact prefix or suffix from a string,
+/// respectively, which should be preferred when possible.
+///
+/// ## Example
+/// ```python
+/// # Evaluates to "foo".
+/// "bar foo baz".strip("bar baz ")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// # Evaluates to "foo".
+/// "bar foo baz".strip("abrz ")  # "foo"
+/// ```
+///
+/// Or:
+/// ```python
+/// # Evaluates to "foo".
+/// "bar foo baz".removeprefix("bar ").removesuffix(" baz")
+///
+/// ## Options
+/// - `target-version`
+///
+/// ## References
+/// - [Python documentation: `str.strip`](https://docs.python.org/3/library/stdtypes.html?highlight=strip#str.strip)
 #[violation]
 pub struct BadStrStripCall {
     strip: StripKind,
@@ -31,14 +64,14 @@ impl Violation for BadStrStripCall {
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum StripKind {
+pub(crate) enum StripKind {
     Strip,
     LStrip,
     RStrip,
 }
 
 impl StripKind {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
         match s {
             "strip" => Some(Self::Strip),
             "lstrip" => Some(Self::LStrip),
@@ -60,13 +93,13 @@ impl fmt::Display for StripKind {
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum RemovalKind {
+pub(crate) enum RemovalKind {
     RemovePrefix,
     RemoveSuffix,
 }
 
 impl RemovalKind {
-    pub fn for_strip(s: StripKind) -> Option<Self> {
+    pub(crate) fn for_strip(s: StripKind) -> Option<Self> {
         match s {
             StripKind::Strip => None,
             StripKind::LStrip => Some(Self::RemovePrefix),
@@ -107,21 +140,21 @@ fn has_duplicates(s: &str) -> bool {
 }
 
 /// PLE1310
-pub fn bad_str_strip_call(checker: &mut Checker, func: &Expr, args: &[Expr]) {
-    if let ExprKind::Attribute { value, attr, .. } = &func.node {
+pub(crate) fn bad_str_strip_call(checker: &mut Checker, func: &Expr, args: &[Expr]) {
+    if let Expr::Attribute(ast::ExprAttribute { value, attr, .. }) = func {
         if matches!(
-            value.node,
-            ExprKind::Constant {
+            value.as_ref(),
+            Expr::Constant(ast::ExprConstant {
                 value: Constant::Str(_) | Constant::Bytes(_),
                 ..
-            }
+            })
         ) {
             if let Some(strip) = StripKind::from_str(attr.as_str()) {
                 if let Some(arg) = args.get(0) {
-                    if let ExprKind::Constant {
+                    if let Expr::Constant(ast::ExprConstant {
                         value: Constant::Str(value),
                         ..
-                    } = &arg.node
+                    }) = &arg
                     {
                         if has_duplicates(value) {
                             let removal = if checker.settings.target_version >= PythonVersion::Py39
@@ -132,7 +165,7 @@ pub fn bad_str_strip_call(checker: &mut Checker, func: &Expr, args: &[Expr]) {
                             };
                             checker.diagnostics.push(Diagnostic::new(
                                 BadStrStripCall { strip, removal },
-                                Range::from(arg),
+                                arg.range(),
                             ));
                         }
                     }

@@ -1,17 +1,19 @@
+use std::borrow::Cow;
+
 use anyhow::{bail, Result};
 use libcst_native::{
-    BooleanOp, BooleanOperation, Codegen, CodegenState, CompoundStatement, Expression, If,
-    LeftParen, ParenthesizableWhitespace, ParenthesizedNode, RightParen, SimpleWhitespace,
-    Statement, Suite,
+    BooleanOp, BooleanOperation, CompoundStatement, Expression, If, LeftParen,
+    ParenthesizableWhitespace, ParenthesizedNode, RightParen, SimpleWhitespace, Statement, Suite,
 };
-use rustpython_parser::ast::Location;
+use rustpython_parser::ast::Ranged;
 
+use crate::autofix::codemods::CodegenStylist;
 use ruff_diagnostics::Edit;
 use ruff_python_ast::source_code::{Locator, Stylist};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::whitespace;
+use ruff_python_whitespace::PythonWhitespace;
 
-use crate::cst::matchers::match_module;
+use crate::cst::matchers::{match_function_def, match_if, match_indented_block, match_statement};
 
 fn parenthesize_and_operand(expr: Expression) -> Expression {
     match &expr {
@@ -40,20 +42,17 @@ pub(crate) fn fix_nested_if_statements(
     };
 
     // Extract the module text.
-    let contents = locator.slice(Range::new(
-        Location::new(stmt.location.row(), 0),
-        Location::new(stmt.end_location.unwrap().row() + 1, 0),
-    ));
+    let contents = locator.lines(stmt.range());
 
     // Handle `elif` blocks differently; detect them upfront.
-    let is_elif = contents.trim_start().starts_with("elif");
+    let is_elif = contents.trim_whitespace_start().starts_with("elif");
 
     // If this is an `elif`, we have to remove the `elif` keyword for now. (We'll
     // restore the `el` later on.)
     let module_text = if is_elif {
-        contents.replacen("elif", "if", 1)
+        Cow::Owned(contents.replacen("elif", "if", 1))
     } else {
-        contents.to_string()
+        Cow::Borrowed(contents)
     };
 
     // If the block is indented, "embed" it in a function definition, to preserve
@@ -62,36 +61,37 @@ pub(crate) fn fix_nested_if_statements(
     let module_text = if outer_indent.is_empty() {
         module_text
     } else {
-        format!("def f():{}{module_text}", stylist.line_ending().as_str())
+        Cow::Owned(format!(
+            "def f():{}{module_text}",
+            stylist.line_ending().as_str()
+        ))
     };
 
     // Parse the CST.
-    let mut tree = match_module(&module_text)?;
+    let mut tree = match_statement(&module_text)?;
 
-    let statements = if outer_indent.is_empty() {
-        &mut *tree.body
+    let statement = if outer_indent.is_empty() {
+        &mut tree
     } else {
-        let [Statement::Compound(CompoundStatement::FunctionDef(embedding))] = &mut *tree.body else {
-            bail!("Expected statement to be embedded in a function definition")
-        };
+        let embedding = match_function_def(&mut tree)?;
 
-        let Suite::IndentedBlock(indented_block) = &mut embedding.body else {
-            bail!("Expected indented block")
-        };
+        let indented_block = match_indented_block(&mut embedding.body)?;
         indented_block.indent = Some(outer_indent);
 
-        &mut *indented_block.body
+        let Some(statement) = indented_block.body.first_mut() else {
+            bail!("Expected indented block to have at least one statement")
+        };
+        statement
     };
 
-    let [Statement::Compound(CompoundStatement::If(outer_if))] = statements else {
-        bail!("Expected one outer if statement")
-    };
+    let outer_if = match_if(statement)?;
 
     let If {
         body: Suite::IndentedBlock(ref mut outer_body),
         orelse: None,
         ..
-    } = outer_if else {
+    } = outer_if
+    else {
         bail!("Expected outer if to have indented body and no else")
     };
 
@@ -113,15 +113,8 @@ pub(crate) fn fix_nested_if_statements(
     }));
     outer_if.body = inner_if.body.clone();
 
-    let mut state = CodegenState {
-        default_newline: &stylist.line_ending(),
-        default_indent: stylist.indentation(),
-        ..Default::default()
-    };
-    tree.codegen(&mut state);
-
     // Reconstruct and reformat the code.
-    let module_text = state.to_string();
+    let module_text = tree.codegen_stylist(stylist);
     let module_text = if outer_indent.is_empty() {
         &module_text
     } else {
@@ -130,14 +123,11 @@ pub(crate) fn fix_nested_if_statements(
             .unwrap()
     };
     let contents = if is_elif {
-        module_text.replacen("if", "elif", 1)
+        Cow::Owned(module_text.replacen("if", "elif", 1))
     } else {
-        module_text.to_string()
+        Cow::Borrowed(module_text)
     };
 
-    Ok(Edit::replacement(
-        contents,
-        Location::new(stmt.location.row(), 0),
-        Location::new(stmt.end_location.unwrap().row() + 1, 0),
-    ))
+    let range = locator.lines_range(stmt.range());
+    Ok(Edit::range_replacement(contents.to_string(), range))
 }

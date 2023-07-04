@@ -1,12 +1,16 @@
-use crate::fs::{relativize_path, relativize_path_to};
-use crate::message::{Emitter, EmitterContext, Message};
-use crate::registry::AsRule;
-use serde::ser::SerializeSeq;
-use serde::{Serialize, Serializer};
-use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
+use serde_json::json;
+
+use ruff_python_ast::source_code::SourceLocation;
+
+use crate::fs::{relativize_path, relativize_path_to};
+use crate::message::{Emitter, EmitterContext, Message};
+use crate::registry::AsRule;
 
 /// Generate JSON with violations in GitLab CI format
 //  https://docs.gitlab.com/ee/ci/testing/code_quality.html#implement-a-custom-tool
@@ -56,6 +60,9 @@ impl Serialize for SerializedMessages<'_> {
         let mut s = serializer.serialize_seq(Some(self.messages.len()))?;
 
         for message in self.messages {
+            let start_location = message.compute_start_location();
+            let end_location = message.compute_end_location();
+
             let lines = if self.context.is_jupyter_notebook(message.filename()) {
                 // We can't give a reasonable location for the structured formats,
                 // so we show one that's clearly a fallback
@@ -65,8 +72,8 @@ impl Serialize for SerializedMessages<'_> {
                 })
             } else {
                 json!({
-                    "begin": message.location.row(),
-                    "end": message.end_location.row()
+                    "begin": start_location.row,
+                    "end": end_location.row
                 })
             };
 
@@ -78,7 +85,7 @@ impl Serialize for SerializedMessages<'_> {
             let value = json!({
                 "description": format!("({}) {}", message.kind.rule().noqa_code(), message.kind.body),
                 "severity": "major",
-                "fingerprint": fingerprint(message),
+                "fingerprint": fingerprint(message, &start_location, &end_location),
                 "location": {
                     "path": path,
                     "lines": lines
@@ -93,23 +100,24 @@ impl Serialize for SerializedMessages<'_> {
 }
 
 /// Generate a unique fingerprint to identify a violation.
-fn fingerprint(message: &Message) -> String {
+fn fingerprint(
+    message: &Message,
+    start_location: &SourceLocation,
+    end_location: &SourceLocation,
+) -> String {
     let Message {
         kind,
-        location,
-        end_location,
+        range: _,
         fix: _fix,
         file,
-        noqa_row: _noqa_row,
+        noqa_offset: _,
     } = message;
 
     let mut hasher = DefaultHasher::new();
 
     kind.rule().hash(&mut hasher);
-    location.row().hash(&mut hasher);
-    location.column().hash(&mut hasher);
-    end_location.row().hash(&mut hasher);
-    end_location.column().hash(&mut hasher);
+    start_location.hash(&mut hasher);
+    end_location.hash(&mut hasher);
     file.name().hash(&mut hasher);
 
     format!("{:x}", hasher.finish())
@@ -117,9 +125,10 @@ fn fingerprint(message: &Message) -> String {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+
     use crate::message::tests::{capture_emitter_output, create_messages};
     use crate::message::GitlabEmitter;
-    use insta::assert_snapshot;
 
     #[test]
     fn output() {

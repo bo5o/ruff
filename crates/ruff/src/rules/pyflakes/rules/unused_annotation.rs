@@ -1,12 +1,27 @@
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_semantic::scope::ScopeId;
+use ruff_python_semantic::ScopeId;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for local variables that are annotated but never used.
+///
+/// ## Why is this bad?
+/// Annotations are used to provide type hints to static type checkers. If a
+/// variable is annotated but never used, the annotation is unnecessary.
+///
+/// ## Example
+/// ```python
+/// def foo():
+///     bar: int
+/// ```
+///
+/// ## References
+/// - [PEP 484](https://peps.python.org/pep-0484/)
 #[violation]
 pub struct UnusedAnnotation {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for UnusedAnnotation {
@@ -18,22 +33,27 @@ impl Violation for UnusedAnnotation {
 }
 
 /// F842
-pub fn unused_annotation(checker: &mut Checker, scope: ScopeId) {
-    let scope = &checker.ctx.scopes[scope];
-    for (name, binding) in scope
+pub(crate) fn unused_annotation(checker: &mut Checker, scope: ScopeId) {
+    let scope = &checker.semantic().scopes[scope];
+
+    let bindings: Vec<_> = scope
         .bindings()
-        .map(|(name, index)| (name, &checker.ctx.bindings[*index]))
-    {
-        if !binding.used()
-            && binding.kind.is_annotation()
-            && !checker.settings.dummy_variable_rgx.is_match(name)
-        {
-            checker.diagnostics.push(Diagnostic::new(
-                UnusedAnnotation {
-                    name: (*name).to_string(),
-                },
-                binding.range,
-            ));
-        }
+        .filter_map(|(name, binding_id)| {
+            let binding = checker.semantic().binding(binding_id);
+            if binding.kind.is_annotation()
+                && !binding.is_used()
+                && !checker.settings.dummy_variable_rgx.is_match(name)
+            {
+                Some((name.to_string(), binding.range))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (name, range) in bindings {
+        checker
+            .diagnostics
+            .push(Diagnostic::new(UnusedAnnotation { name }, range));
     }
 }

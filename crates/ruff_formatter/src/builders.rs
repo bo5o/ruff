@@ -1,14 +1,13 @@
 use crate::format_element::tag::{Condition, Tag};
 use crate::prelude::tag::{DedentMode, GroupMode, LabelId};
 use crate::prelude::*;
-use crate::{format_element, write, Argument, Arguments, GroupId, TextSize};
+use crate::{format_element, write, Argument, Arguments, FormatContext, GroupId, TextSize};
 use crate::{Buffer, VecBuffer};
 
 use ruff_text_size::TextRange;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::num::NonZeroU8;
-use std::rc::Rc;
 use Tag::*;
 
 /// A line break that only gets printed if the enclosing `Group` doesn't fit on a single line.
@@ -276,8 +275,62 @@ impl std::fmt::Debug for StaticText {
     }
 }
 
-/// Creates a text from a dynamic string and a range of the input source
-pub fn dynamic_text(text: &str, position: TextSize) -> DynamicText {
+/// Creates a source map entry from the passed source `position` to the position in the formatted output.
+///
+/// ## Examples
+///
+/// ```
+/// /// ```
+/// use ruff_formatter::format;
+/// use ruff_formatter::prelude::*;
+///
+/// # fn main() -> FormatResult<()> {
+/// // the tab must be encoded as \\t to not literally print a tab character ("Hello{tab}World" vs "Hello\tWorld")
+/// use ruff_text_size::TextSize;
+/// use ruff_formatter::SourceMarker;
+///
+///
+/// let elements = format!(SimpleFormatContext::default(), [
+///     source_position(TextSize::new(0)),
+///     text("\"Hello "),
+///     source_position(TextSize::new(8)),
+///     text("'Ruff'"),
+///     source_position(TextSize::new(14)),
+///     text("\""),
+///     source_position(TextSize::new(20))
+/// ])?;
+///
+/// let printed = elements.print()?;
+///
+/// assert_eq!(printed.as_code(), r#""Hello 'Ruff'""#);
+/// assert_eq!(printed.sourcemap(), [
+///     SourceMarker { source: TextSize::new(0), dest: TextSize::new(0) },
+///     SourceMarker { source: TextSize::new(0), dest: TextSize::new(7) },
+///     SourceMarker { source: TextSize::new(8), dest: TextSize::new(7) },
+///     SourceMarker { source: TextSize::new(8), dest: TextSize::new(13) },
+///     SourceMarker { source: TextSize::new(14), dest: TextSize::new(13) },
+///     SourceMarker { source: TextSize::new(14), dest: TextSize::new(14) },
+///     SourceMarker { source: TextSize::new(20), dest: TextSize::new(14) },
+/// ]);
+///
+/// # Ok(())
+/// # }
+/// ```
+pub const fn source_position(position: TextSize) -> SourcePosition {
+    SourcePosition(position)
+}
+
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub struct SourcePosition(TextSize);
+
+impl<Context> Format<Context> for SourcePosition {
+    fn fmt(&self, f: &mut Formatter<Context>) -> FormatResult<()> {
+        f.write_element(FormatElement::SourcePosition(self.0))
+    }
+}
+
+/// Creates a text from a dynamic string with its optional start-position in the source document
+pub fn dynamic_text(text: &str, position: Option<TextSize>) -> DynamicText {
     debug_assert_no_newlines(text);
 
     DynamicText { text, position }
@@ -286,14 +339,17 @@ pub fn dynamic_text(text: &str, position: TextSize) -> DynamicText {
 #[derive(Eq, PartialEq)]
 pub struct DynamicText<'a> {
     text: &'a str,
-    position: TextSize,
+    position: Option<TextSize>,
 }
 
 impl<Context> Format<Context> for DynamicText<'_> {
     fn fmt(&self, f: &mut Formatter<Context>) -> FormatResult<()> {
+        if let Some(source_position) = self.position {
+            f.write_element(FormatElement::SourcePosition(source_position))?;
+        }
+
         f.write_element(FormatElement::DynamicText {
             text: self.text.to_string().into_boxed_str(),
-            source_position: self.position,
         })
     }
 }
@@ -304,31 +360,65 @@ impl std::fmt::Debug for DynamicText<'_> {
     }
 }
 
-/// Creates a text from a dynamic string and a range of the input source
-pub fn static_text_slice(text: Rc<str>, range: TextRange) -> StaticTextSlice {
-    debug_assert_no_newlines(&text[range]);
-
-    StaticTextSlice { text, range }
-}
-
-#[derive(Eq, PartialEq)]
-pub struct StaticTextSlice {
-    text: Rc<str>,
+/// Emits a text as it is written in the source document. Optimized to avoid allocations.
+pub const fn source_text_slice(
     range: TextRange,
-}
-
-impl<Context> Format<Context> for StaticTextSlice {
-    fn fmt(&self, f: &mut Formatter<Context>) -> FormatResult<()> {
-        f.write_element(FormatElement::StaticTextSlice {
-            text: self.text.clone(),
-            range: self.range,
-        })
+    newlines: ContainsNewlines,
+) -> SourceTextSliceBuilder {
+    SourceTextSliceBuilder {
+        range,
+        new_lines: newlines,
     }
 }
 
-impl std::fmt::Debug for StaticTextSlice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::write!(f, "StaticTextSlice({})", &self.text[self.range])
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ContainsNewlines {
+    /// The string contains newline characters
+    Yes,
+    /// The string contains no newline characters
+    No,
+
+    /// The string may contain newline characters, search the string to determine if there are any newlines.
+    Detect,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub struct SourceTextSliceBuilder {
+    range: TextRange,
+    new_lines: ContainsNewlines,
+}
+
+impl<Context> Format<Context> for SourceTextSliceBuilder
+where
+    Context: FormatContext,
+{
+    fn fmt(&self, f: &mut Formatter<Context>) -> FormatResult<()> {
+        let source_code = f.context().source_code();
+        let slice = source_code.slice(self.range);
+        debug_assert_no_newlines(slice.text(source_code));
+
+        let contains_newlines = match self.new_lines {
+            ContainsNewlines::Yes => {
+                debug_assert!(
+                    slice.text(source_code).contains('\n'),
+                    "Text contains no new line characters but the caller specified that it does."
+                );
+                true
+            }
+            ContainsNewlines::No => {
+                debug_assert!(
+                    !slice.text(source_code).contains('\n'),
+                    "Text contains new line characters but the caller specified that it does not."
+                );
+                false
+            }
+            ContainsNewlines::Detect => slice.text(source_code).contains('\n'),
+        };
+
+        f.write_element(FormatElement::SourceCodeSlice {
+            slice,
+            contains_newlines,
+        })
     }
 }
 
@@ -438,7 +528,22 @@ impl<Context> Format<Context> for LineSuffixBoundary {
 /// use ruff_formatter::prelude::*;
 /// use ruff_formatter::{format, write, LineWidth};
 ///
-/// enum SomeLabelId {}
+/// #[derive(Debug, Copy, Clone)]
+/// enum MyLabels {
+///     Main
+/// }
+///
+/// impl tag::LabelDefinition for MyLabels {
+///     fn value(&self) -> u64 {
+///         *self as u64
+///     }
+///
+///     fn name(&self) -> &'static str {
+///         match self {
+///             Self::Main => "Main"
+///         }
+///     }
+/// }
 ///
 /// # fn main() -> FormatResult<()> {
 /// let formatted = format!(
@@ -447,24 +552,24 @@ impl<Context> Format<Context> for LineSuffixBoundary {
 ///         let mut recording = f.start_recording();
 ///         write!(recording, [
 ///             labelled(
-///                 LabelId::of::<SomeLabelId>(),
+///                 LabelId::of(MyLabels::Main),
 ///                 &text("'I have a label'")
 ///             )
 ///         ])?;
 ///
 ///         let recorded = recording.stop();
 ///
-///         let is_labelled = recorded.first().map_or(false, |element| element.has_label(LabelId::of::<SomeLabelId>()));
+///         let is_labelled = recorded.first().map_or(false, |element| element.has_label(LabelId::of(MyLabels::Main)));
 ///
 ///         if is_labelled {
-///             write!(f, [text(" has label SomeLabelId")])
+///             write!(f, [text(" has label `Main`")])
 ///         } else {
-///             write!(f, [text(" doesn't have label SomeLabelId")])
+///             write!(f, [text(" doesn't have label `Main`")])
 ///         }
 ///     })]
 /// )?;
 ///
-/// assert_eq!("'I have a label' has label SomeLabelId", formatted.print()?.as_code());
+/// assert_eq!("'I have a label' has label `Main`", formatted.print()?.as_code());
 /// # Ok(())
 /// # }
 /// ```
@@ -1781,7 +1886,7 @@ impl<Context, T> std::fmt::Debug for FormatWith<Context, T> {
 ///                 let mut join = f.join_with(&separator);
 ///
 ///                 for item in &self.items {
-///                     join.entry(&format_with(|f| write!(f, [dynamic_text(item, TextSize::default())])));
+///                     join.entry(&format_with(|f| write!(f, [dynamic_text(item, None)])));
 ///                 }
 ///                 join.finish()
 ///             })),
@@ -2043,6 +2148,7 @@ impl<'a, 'buf, Context> FillBuilder<'a, 'buf, Context> {
 #[derive(Copy, Clone)]
 pub struct BestFitting<'a, Context> {
     variants: Arguments<'a, Context>,
+    mode: BestFittingMode,
 }
 
 impl<'a, Context> BestFitting<'a, Context> {
@@ -2060,7 +2166,115 @@ impl<'a, Context> BestFitting<'a, Context> {
             "Requires at least the least expanded and most expanded variants"
         );
 
-        Self { variants }
+        Self {
+            variants,
+            mode: BestFittingMode::default(),
+        }
+    }
+
+    /// Changes the mode used by this best fitting element to determine whether a variant fits.
+    ///
+    /// ## Examples
+    ///
+    /// ### All Lines
+    ///
+    /// ```
+    /// use ruff_formatter::{Formatted, LineWidth, format, format_args, SimpleFormatOptions};
+    /// use ruff_formatter::prelude::*;
+    ///
+    /// # fn main() -> FormatResult<()> {
+    /// let formatted = format!(
+    ///     SimpleFormatContext::default(),
+    ///     [
+    ///         best_fitting!(
+    ///             // Everything fits on a single line
+    ///             format_args!(
+    ///                 group(&format_args![
+    ///                     text("["),
+    ///                         soft_block_indent(&format_args![
+    ///                         text("1,"),
+    ///                         soft_line_break_or_space(),
+    ///                         text("2,"),
+    ///                         soft_line_break_or_space(),
+    ///                         text("3"),
+    ///                     ]),
+    ///                     text("]")
+    ///                 ]),
+    ///                 space(),
+    ///                 text("+"),
+    ///                 space(),
+    ///                 text("aVeryLongIdentifier")
+    ///             ),
+    ///
+    ///             // Breaks after `[` and prints each elements on a single line
+    ///             // The group is necessary because the variant, by default is printed in flat mode and a
+    ///             // hard line break indicates that the content doesn't fit.
+    ///             format_args!(
+    ///                 text("["),
+    ///                 group(&block_indent(&format_args![text("1,"), hard_line_break(), text("2,"), hard_line_break(), text("3")])).should_expand(true),
+    ///                 text("]"),
+    ///                 space(),
+    ///                 text("+"),
+    ///                 space(),
+    ///                 text("aVeryLongIdentifier")
+    ///             ),
+    ///
+    ///             // Adds parentheses and indents the body, breaks after the operator
+    ///             format_args!(
+    ///                 text("("),
+    ///                 block_indent(&format_args![
+    ///                     text("["),
+    ///                     block_indent(&format_args![
+    ///                         text("1,"),
+    ///                         hard_line_break(),
+    ///                         text("2,"),
+    ///                         hard_line_break(),
+    ///                         text("3"),
+    ///                     ]),
+    ///                     text("]"),
+    ///                     hard_line_break(),
+    ///                     text("+"),
+    ///                     space(),
+    ///                     text("aVeryLongIdentifier")
+    ///                 ]),
+    ///                 text(")")
+    ///             )
+    ///         ).with_mode(BestFittingMode::AllLines)
+    ///     ]
+    /// )?;
+    ///
+    /// let document = formatted.into_document();
+    ///
+    /// // Takes the first variant if everything fits on a single line
+    /// assert_eq!(
+    ///     "[1, 2, 3] + aVeryLongIdentifier",
+    ///     Formatted::new(document.clone(), SimpleFormatContext::default())
+    ///         .print()?
+    ///         .as_code()
+    /// );
+    ///
+    /// // It takes the second if the first variant doesn't fit on a single line. The second variant
+    /// // has some additional line breaks to make sure inner groups don't break
+    /// assert_eq!(
+    ///     "[\n\t1,\n\t2,\n\t3\n] + aVeryLongIdentifier",
+    ///     Formatted::new(document.clone(), SimpleFormatContext::new(SimpleFormatOptions { line_width: 23.try_into().unwrap(), ..SimpleFormatOptions::default() }))
+    ///         .print()?
+    ///         .as_code()
+    /// );
+    ///
+    /// // Prints the last option as last resort
+    /// assert_eq!(
+    ///     "(\n\t[\n\t\t1,\n\t\t2,\n\t\t3\n\t]\n\t+ aVeryLongIdentifier\n)",
+    ///     Formatted::new(document.clone(), SimpleFormatContext::new(SimpleFormatOptions { line_width: 22.try_into().unwrap(), ..SimpleFormatOptions::default() }))
+    ///         .print()?
+    ///         .as_code()
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_mode(mut self, mode: BestFittingMode) -> Self {
+        self.mode = mode;
+        self
     }
 }
 
@@ -2082,9 +2296,12 @@ impl<Context> Format<Context> for BestFitting<'_, Context> {
         // SAFETY: The constructor guarantees that there are always at least two variants. It's, therefore,
         // safe to call into the unsafe `from_vec_unchecked` function
         let element = unsafe {
-            FormatElement::BestFitting(format_element::BestFitting::from_vec_unchecked(
-                formatted_variants,
-            ))
+            FormatElement::BestFitting {
+                variants: format_element::BestFittingVariants::from_vec_unchecked(
+                    formatted_variants,
+                ),
+                mode: self.mode,
+            }
         };
 
         f.write_element(element)

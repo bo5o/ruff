@@ -1,54 +1,57 @@
-//! Checks for unused loop variables.
-//!
-//! ## Why is this bad?
-//!
-//! Unused variables may signal a mistake or unfinished code.
-//!
-//! ## Example
-//!
-//! ```python
-//! for x in range(10):
-//!     method()
-//! ```
-//!
-//! Prefix the variable with an underscore:
-//!
-//! ```python
-//! for _x in range(10):
-//!     method()
-//! ```
-
 use rustc_hash::FxHashMap;
-use rustpython_parser::ast::{Expr, ExprKind, Stmt};
-use serde::{Deserialize, Serialize};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
-use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Violation};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::{Range, RefEquality};
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{helpers, visitor};
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, result_like::BoolLike)]
-pub enum Certainty {
+#[derive(Debug, Copy, Clone, PartialEq, Eq, result_like::BoolLike)]
+enum Certainty {
     Certain,
     Uncertain,
 }
 
+/// ## What it does
+/// Checks for unused variables in loops (e.g., `for` and `while` statements).
+///
+/// ## Why is this bad?
+/// Defining a variable in a loop statement that is never used can confuse
+/// readers.
+///
+/// If the variable is intended to be unused (e.g., to facilitate
+/// destructuring of a tuple or other object), prefix it with an underscore
+/// to indicate the intent. Otherwise, remove the variable entirely.
+///
+/// ## Example
+/// ```python
+/// for i, j in foo:
+///     bar(i)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// for i, _j in foo:
+///     bar(i)
+/// ```
+///
+/// ## References
+/// - [PEP 8: Naming Conventions](https://peps.python.org/pep-0008/#naming-conventions)
 #[violation]
 pub struct UnusedLoopControlVariable {
     /// The name of the loop control variable.
-    pub name: String,
+    name: String,
     /// The name to which the variable should be renamed, if it can be
     /// safely renamed.
-    pub rename: Option<String>,
+    rename: Option<String>,
     /// Whether the variable is certain to be unused in the loop body, or
     /// merely suspect. A variable _may_ be used, but undetectably
     /// so, if the loop incorporates by magic control flow (e.g.,
     /// `locals()`).
-    pub certainty: Certainty,
+    certainty: Certainty,
 }
 
 impl Violation for UnusedLoopControlVariable {
@@ -66,22 +69,16 @@ impl Violation for UnusedLoopControlVariable {
         }
     }
 
-    fn autofix_title_formatter(&self) -> Option<fn(&Self) -> String> {
-        let UnusedLoopControlVariable {
-            certainty, rename, ..
-        } = self;
-        if certainty.to_bool() && rename.is_some() {
-            Some(|UnusedLoopControlVariable { name, rename, .. }| {
-                let rename = rename.as_ref().unwrap();
-                format!("Rename unused `{name}` to `{rename}`")
-            })
-        } else {
-            None
-        }
+    fn autofix_title(&self) -> Option<String> {
+        let UnusedLoopControlVariable { rename, name, .. } = self;
+
+        rename
+            .as_ref()
+            .map(|rename| format!("Rename unused `{name}` to `{rename}`"))
     }
 }
 
-/// Identify all `ExprKind::Name` nodes in an AST.
+/// Identify all `Expr::Name` nodes in an AST.
 struct NameFinder<'a> {
     /// A map from identifier to defining expression.
     names: FxHashMap<&'a str, &'a Expr>,
@@ -100,7 +97,7 @@ where
     'b: 'a,
 {
     fn visit_expr(&mut self, expr: &'a Expr) {
-        if let ExprKind::Name { id, .. } = &expr.node {
+        if let Expr::Name(ast::ExprName { id, .. }) = expr {
             self.names.insert(id, expr);
         }
         visitor::walk_expr(self, expr);
@@ -108,12 +105,7 @@ where
 }
 
 /// B007
-pub fn unused_loop_control_variable(
-    checker: &mut Checker,
-    stmt: &Stmt,
-    target: &Expr,
-    body: &[Stmt],
-) {
+pub(crate) fn unused_loop_control_variable(checker: &mut Checker, target: &Expr, body: &[Stmt]) {
     let control_names = {
         let mut finder = NameFinder::new();
         finder.visit_expr(target);
@@ -141,7 +133,7 @@ pub fn unused_loop_control_variable(
 
         // Avoid fixing any variables that _may_ be used, but undetectably so.
         let certainty = Certainty::from(!helpers::uses_magic_variable_access(body, |id| {
-            checker.ctx.is_builtin(id)
+            checker.semantic().is_builtin(id)
         }));
 
         // Attempt to rename the variable by prepending an underscore, but avoid
@@ -160,29 +152,22 @@ pub fn unused_loop_control_variable(
                 rename: rename.clone(),
                 certainty,
             },
-            Range::from(expr),
+            expr.range(),
         );
         if let Some(rename) = rename {
             if certainty.into() && checker.patch(diagnostic.kind.rule()) {
-                // Find the `BindingKind::LoopVar` corresponding to the name.
-                let scope = checker.ctx.scope();
-                let binding = scope.bindings_for_name(name).find_map(|index| {
-                    let binding = &checker.ctx.bindings[*index];
-                    binding
-                        .source
-                        .as_ref()
-                        .and_then(|source| (source == &RefEquality(stmt)).then_some(binding))
-                });
-                if let Some(binding) = binding {
-                    if binding.kind.is_loop_var() {
-                        if !binding.used() {
-                            diagnostic.set_fix(Edit::replacement(
-                                rename,
-                                expr.location,
-                                expr.end_location.unwrap(),
-                            ));
-                        }
-                    }
+                // Avoid fixing if the variable, or any future bindings to the variable, are
+                // used _after_ the loop.
+                let scope = checker.semantic().scope();
+                if scope
+                    .get_all(name)
+                    .map(|binding_id| checker.semantic().binding(binding_id))
+                    .all(|binding| !binding.is_used())
+                {
+                    diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                        rename,
+                        expr.range(),
+                    )));
                 }
             }
         }

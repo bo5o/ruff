@@ -3,15 +3,15 @@ source: crates/ruff/src/rules/pyupgrade/mod.rs
 ---
 UP034.py:2:7: UP034 [*] Avoid extraneous parentheses
   |
-2 | # UP034
-3 | print(("foo"))
+1 | # UP034
+2 | print(("foo"))
   |       ^^^^^^^ UP034
-4 | 
-5 | # UP034
+3 | 
+4 | # UP034
   |
   = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 1 1 | # UP034
 2   |-print(("foo"))
   2 |+print("foo")
@@ -21,15 +21,15 @@ UP034.py:2:7: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:5:7: UP034 [*] Avoid extraneous parentheses
   |
-5 | # UP034
-6 | print(("hell((goodybe))o"))
+4 | # UP034
+5 | print(("hell((goodybe))o"))
   |       ^^^^^^^^^^^^^^^^^^^^ UP034
-7 | 
-8 | # UP034
+6 | 
+7 | # UP034
   |
   = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 2 2 | print(("foo"))
 3 3 | 
 4 4 | # UP034
@@ -41,15 +41,15 @@ UP034.py:5:7: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:8:7: UP034 [*] Avoid extraneous parentheses
    |
- 8 | # UP034
- 9 | print((("foo")))
+ 7 | # UP034
+ 8 | print((("foo")))
    |       ^^^^^^^^^ UP034
-10 | 
-11 | # UP034
+ 9 | 
+10 | # UP034
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 5 5 | print(("hell((goodybe))o"))
 6 6 | 
 7 7 | # UP034
@@ -61,15 +61,15 @@ UP034.py:8:7: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:11:7: UP034 [*] Avoid extraneous parentheses
    |
-11 | # UP034
-12 | print((((1))))
+10 | # UP034
+11 | print((((1))))
    |       ^^^^^^^ UP034
-13 | 
-14 | # UP034
+12 | 
+13 | # UP034
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 8  8  | print((("foo")))
 9  9  | 
 10 10 | # UP034
@@ -81,15 +81,15 @@ UP034.py:11:7: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:14:7: UP034 [*] Avoid extraneous parentheses
    |
-14 | # UP034
-15 | print(("foo{}".format(1)))
+13 | # UP034
+14 | print(("foo{}".format(1)))
    |       ^^^^^^^^^^^^^^^^^^^ UP034
-16 | 
-17 | # UP034
+15 | 
+16 | # UP034
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 11 11 | print((((1))))
 12 12 | 
 13 13 | # UP034
@@ -101,15 +101,15 @@ UP034.py:14:7: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:18:5: UP034 [*] Avoid extraneous parentheses
    |
-18 | # UP034
-19 | print(
-20 |     ("foo{}".format(1))
+16 | # UP034
+17 | print(
+18 |     ("foo{}".format(1))
    |     ^^^^^^^^^^^^^^^^^^^ UP034
-21 | )
+19 | )
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 15 15 | 
 16 16 | # UP034
 17 17 | print(
@@ -121,18 +121,18 @@ UP034.py:18:5: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:23:5: UP034 [*] Avoid extraneous parentheses
    |
-23 |   # UP034
-24 |   print(
-25 |       (
+21 |   # UP034
+22 |   print(
+23 |       (
    |  _____^
-26 | |         "foo"
-27 | |     )
+24 | |         "foo"
+25 | |     )
    | |_____^ UP034
-28 |   )
+26 |   )
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 20 20 | 
 21 21 | # UP034
 22 22 | print(
@@ -147,16 +147,16 @@ UP034.py:23:5: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:30:13: UP034 [*] Avoid extraneous parentheses
    |
-30 | # UP034
-31 | def f():
-32 |     x = int(((yield 1)))
+28 | # UP034
+29 | def f():
+30 |     x = int(((yield 1)))
    |             ^^^^^^^^^^^ UP034
-33 | 
-34 | # UP034
+31 | 
+32 | # UP034
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 27 27 | 
 28 28 | # UP034
 29 29 | def f():
@@ -168,15 +168,15 @@ UP034.py:30:13: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:35:9: UP034 [*] Avoid extraneous parentheses
    |
-35 | if True:
-36 |     print(
-37 |         ("foo{}".format(1))
+33 | if True:
+34 |     print(
+35 |         ("foo{}".format(1))
    |         ^^^^^^^^^^^^^^^^^^^ UP034
-38 |     )
+36 |     )
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 32 32 | # UP034
 33 33 | if True:
 34 34 |     print(
@@ -188,15 +188,15 @@ UP034.py:35:9: UP034 [*] Avoid extraneous parentheses
 
 UP034.py:39:7: UP034 [*] Avoid extraneous parentheses
    |
-39 | # UP034
-40 | print((x for x in range(3)))
+38 | # UP034
+39 | print((x for x in range(3)))
    |       ^^^^^^^^^^^^^^^^^^^^^ UP034
-41 | 
-42 | # OK
+40 | 
+41 | # OK
    |
    = help: Remove extraneous parentheses
 
-ℹ Suggested fix
+ℹ Fix
 36 36 |     )
 37 37 | 
 38 38 | # UP034

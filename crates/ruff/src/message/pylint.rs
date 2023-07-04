@@ -1,7 +1,10 @@
+use std::io::Write;
+
+use ruff_python_ast::source_code::OneIndexed;
+
 use crate::fs::relativize_path;
 use crate::message::{Emitter, EmitterContext, Message};
 use crate::registry::AsRule;
-use std::io::Write;
 
 /// Generate violations in Pylint format.
 /// See: [Flake8 documentation](https://flake8.pycqa.org/en/latest/internal/formatters.html#pylint-formatter)
@@ -19,9 +22,9 @@ impl Emitter for PylintEmitter {
             let row = if context.is_jupyter_notebook(message.filename()) {
                 // We can't give a reasonable location for the structured formats,
                 // so we show one that's clearly a fallback
-                1
+                OneIndexed::from_zero_indexed(0)
             } else {
-                message.location.row()
+                message.compute_start_location().row
             };
 
             writeln!(
@@ -39,9 +42,10 @@ impl Emitter for PylintEmitter {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+
     use crate::message::tests::{capture_emitter_output, create_messages};
     use crate::message::PylintEmitter;
-    use insta::assert_snapshot;
 
     #[test]
     fn output() {

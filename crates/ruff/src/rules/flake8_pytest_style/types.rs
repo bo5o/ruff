@@ -1,11 +1,11 @@
 use std::fmt::{Display, Formatter};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use ruff_macros::CacheKey;
 
-#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ParametrizeNameType {
     #[serde(rename = "csv")]
     Csv,
@@ -31,7 +31,8 @@ impl Display for ParametrizeNameType {
     }
 }
 
-#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ParametrizeValuesType {
     #[serde(rename = "tuple")]
     Tuple,
@@ -54,7 +55,8 @@ impl Display for ParametrizeValuesType {
     }
 }
 
-#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, CacheKey, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ParametrizeValuesRowType {
     #[serde(rename = "tuple")]
     Tuple,

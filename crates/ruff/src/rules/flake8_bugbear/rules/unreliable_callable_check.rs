@@ -1,11 +1,36 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for uses of `hasattr` to test if an object is callable (e.g.,
+/// `hasattr(obj, "__call__")`).
+///
+/// ## Why is this bad?
+/// Using `hasattr` is an unreliable mechanism for testing if an object is
+/// callable. If `obj` implements a custom `__getattr__`, or if its `__call__`
+/// is itself not callable, you may get misleading results.
+///
+/// Instead, use `callable(obj)` to test if `obj` is callable.
+///
+/// ## Example
+/// ```python
+/// hasattr(obj, "__call__")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// callable(obj)
+/// ```
+///
+/// ## References
+/// - [Python documentation: `callable`](https://docs.python.org/3/library/functions.html#callable)
+/// - [Python documentation: `hasattr`](https://docs.python.org/3/library/functions.html#hasattr)
+/// - [Python documentation: `__getattr__`](https://docs.python.org/3/reference/datamodel.html#object.__getattr__)
+/// - [Python documentation: `__call__`](https://docs.python.org/3/reference/datamodel.html#object.__call__)
 #[violation]
 pub struct UnreliableCallableCheck;
 
@@ -20,8 +45,13 @@ impl Violation for UnreliableCallableCheck {
 }
 
 /// B004
-pub fn unreliable_callable_check(checker: &mut Checker, expr: &Expr, func: &Expr, args: &[Expr]) {
-    let ExprKind::Name { id, .. } = &func.node else {
+pub(crate) fn unreliable_callable_check(
+    checker: &mut Checker,
+    expr: &Expr,
+    func: &Expr,
+    args: &[Expr],
+) {
+    let Expr::Name(ast::ExprName { id, .. }) = func else {
         return;
     };
     if id != "getattr" && id != "hasattr" {
@@ -30,11 +60,11 @@ pub fn unreliable_callable_check(checker: &mut Checker, expr: &Expr, func: &Expr
     if args.len() < 2 {
         return;
     };
-    let ExprKind::Constant {
+    let Expr::Constant(ast::ExprConstant {
         value: Constant::Str(s),
         ..
-    } = &args[1].node else
-    {
+    }) = &args[1]
+    else {
         return;
     };
     if s != "__call__" {
@@ -42,5 +72,5 @@ pub fn unreliable_callable_check(checker: &mut Checker, expr: &Expr, func: &Expr
     }
     checker
         .diagnostics
-        .push(Diagnostic::new(UnreliableCallableCheck, Range::from(expr)));
+        .push(Diagnostic::new(UnreliableCallableCheck, expr.range()));
 }

@@ -3,21 +3,27 @@ use std::collections::HashSet;
 
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Attribute, Data, DataEnum, DeriveInput, Error, Lit, Meta, MetaNameValue};
+use syn::{Attribute, Data, DataEnum, DeriveInput, Error, ExprLit, Lit, Meta, MetaNameValue};
 
-pub fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    let DeriveInput { ident, data: Data::Enum(DataEnum {
-        variants, ..
-    }), .. } = input else {
-        return Err(Error::new(input.ident.span(), "only named fields are supported"));
+pub(crate) fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let DeriveInput {
+        ident,
+        data: Data::Enum(DataEnum { variants, .. }),
+        ..
+    } = input
+    else {
+        return Err(Error::new(
+            input.ident.span(),
+            "only named fields are supported",
+        ));
     };
 
     let mut parsed = Vec::new();
 
     let mut common_prefix_match_arms = quote!();
-    let mut name_match_arms =
-        quote!(Self::Ruff => "Ruff-specific rules", Self::Numpy => "NumPy-specific rules", );
-    let mut url_match_arms = quote!(Self::Ruff => None, Self::Numpy => None, );
+    let mut name_match_arms = quote!(Self::Ruff => "Ruff-specific rules", Self::Numpy => "NumPy-specific rules", Self::Copyright => "Copyright-related rules", );
+    let mut url_match_arms =
+        quote!(Self::Ruff => None, Self::Numpy => None, Self::Copyright => None, );
 
     let mut all_prefixes = HashSet::new();
 
@@ -26,9 +32,9 @@ pub fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         let prefixes: Result<Vec<_>, _> = variant
             .attrs
             .iter()
-            .filter(|attr| attr.path.is_ident("prefix"))
+            .filter(|attr| attr.path().is_ident("prefix"))
             .map(|attr| {
-                let Ok(Meta::NameValue(MetaNameValue{lit: Lit::Str(lit), ..})) = attr.parse_meta() else {
+                let Meta::NameValue(MetaNameValue{value: syn::Expr::Lit (ExprLit { lit: Lit::Str(lit), ..}), ..}) = &attr.meta else {
                     return Err(Error::new(attr.span(), r#"expected attribute to be in the form of [#prefix = "..."]"#));
                 };
                 let str = lit.value();
@@ -53,13 +59,17 @@ pub fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             ));
         }
 
-        let Some(doc_attr) = variant.attrs.iter().find(|attr| attr.path.is_ident("doc")) else {
-            return Err(Error::new(variant.span(), r#"expected a doc comment"#))
+        let Some(doc_attr) = variant
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("doc"))
+        else {
+            return Err(Error::new(variant.span(), r#"expected a doc comment"#));
         };
 
         let variant_ident = variant.ident;
 
-        if variant_ident != "Ruff" && variant_ident != "Numpy" {
+        if variant_ident != "Ruff" && variant_ident != "Numpy" && variant_ident != "Copyright" {
             let (name, url) = parse_doc_attr(doc_attr)?;
             name_match_arms.extend(quote! {Self::#variant_ident => #name,});
             url_match_arms.extend(quote! {Self::#variant_ident => Some(#url),});
@@ -125,8 +135,19 @@ pub fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
 /// Parses an attribute in the form of `#[doc = " [name](https://example.com/)"]`
 /// into a tuple of link label and URL.
 fn parse_doc_attr(doc_attr: &Attribute) -> syn::Result<(String, String)> {
-    let Ok(Meta::NameValue(MetaNameValue{lit: Lit::Str(doc_lit), ..})) = doc_attr.parse_meta() else {
-        return Err(Error::new(doc_attr.span(), r#"expected doc attribute to be in the form of #[doc = "..."]"#))
+    let Meta::NameValue(MetaNameValue {
+        value:
+            syn::Expr::Lit(ExprLit {
+                lit: Lit::Str(doc_lit),
+                ..
+            }),
+        ..
+    }) = &doc_attr.meta
+    else {
+        return Err(Error::new(
+            doc_attr.span(),
+            r#"expected doc attribute to be in the form of #[doc = "..."]"#,
+        ));
     };
     parse_markdown_link(doc_lit.value().trim())
         .map(|(name, url)| (name.to_string(), url.to_string()))

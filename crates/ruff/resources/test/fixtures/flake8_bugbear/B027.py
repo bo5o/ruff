@@ -4,7 +4,12 @@ B027 - on lines 13, 16, 19, 23
 """
 import abc
 from abc import ABC
-from abc import abstractmethod, abstractproperty
+from abc import (
+    abstractmethod,
+    abstractproperty,
+    abstractclassmethod,
+    abstractstaticmethod,
+)
 from abc import abstractmethod as notabstract
 from abc import abstractproperty as notabstract_property
 
@@ -55,6 +60,22 @@ class AbstractClass(ABC):
     def abstract_6(self):
         ...
 
+    @abstractclassmethod
+    def abstract_7(self):
+        pass
+
+    @abc.abstractclassmethod
+    def abstract_8(self):
+        ...
+
+    @abstractstaticmethod
+    def abstract_9(self):
+        pass
+
+    @abc.abstractstaticmethod
+    def abstract_10(self):
+        ...
+
     def body_1(self):
         print("foo")
         ...
@@ -99,3 +120,11 @@ class AbstractClass(ABC):
     @abstractmethod
     def empty_1(self, foo: Union[str, int, list, float]):
         ...
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Foo(ABC):  # noqa: B024
+    ...

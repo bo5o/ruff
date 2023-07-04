@@ -146,3 +146,29 @@ def f():
     import pandas as pd
 
     x = dict[pd.DataFrame, pd.DataFrame]
+
+
+def f():
+    import pandas as pd
+
+
+def f():
+    from pandas import DataFrame  # noqa: TCH002
+
+    x: DataFrame = 2
+
+
+def f():
+    from pandas import (  # noqa: TCH002
+        DataFrame,
+    )
+
+    x: DataFrame = 2
+
+
+def f():
+    global Member
+
+    from module import Member
+
+    x: Member = 1

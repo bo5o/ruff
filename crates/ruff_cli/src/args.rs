@@ -3,6 +3,9 @@ use std::str::FromStr;
 
 use clap::{command, Parser};
 use regex::Regex;
+use rustc_hash::FxHashMap;
+
+use ruff::line_width::LineLength;
 use ruff::logging::LogLevel;
 use ruff::registry::Rule;
 use ruff::resolver::ConfigProcessor;
@@ -11,7 +14,6 @@ use ruff::settings::types::{
     FilePattern, PatternPrefixPair, PerFileIgnore, PythonVersion, SerializationFormat,
 };
 use ruff::RuleSelector;
-use rustc_hash::FxHashMap;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,9 +59,16 @@ pub enum Command {
     /// Generate shell completion.
     #[clap(alias = "--generate-shell-completion", hide = true)]
     GenerateShellCompletion { shell: clap_complete_command::Shell },
+    /// Format the given files, or stdin when using `-`.
+    #[doc(hidden)]
+    #[clap(hide = true)]
+    Format {
+        /// List of files or directories to format or `-` for stdin
+        files: Vec<PathBuf>,
+    },
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools, clippy::module_name_repetitions)]
 pub struct CheckArgs {
     /// List of files or directories to check.
@@ -80,7 +89,7 @@ pub struct CheckArgs {
     #[clap(long, overrides_with("show_fixes"), hide = true)]
     no_show_fixes: bool,
     /// Avoid writing any fixed files back; instead, output a diff for each
-    /// changed file to stdout.
+    /// changed file to stdout. Implies `--fix-only`.
     #[arg(long, conflicts_with = "show_fixes")]
     pub diff: bool,
     /// Run in watch mode by re-running whenever files change.
@@ -98,6 +107,9 @@ pub struct CheckArgs {
     /// Output serialization format for violations.
     #[arg(long, value_enum, env = "RUFF_FORMAT")]
     pub format: Option<SerializationFormat>,
+    /// Specify file to write the linter output to (default: stdout).
+    #[arg(short, long)]
+    pub output_file: Option<PathBuf>,
     /// The minimum Python version that should be supported.
     #[arg(long, value_enum)]
     pub target_version: Option<PythonVersion>,
@@ -126,8 +138,8 @@ pub struct CheckArgs {
         hide_possible_values = true
     )]
     pub ignore: Option<Vec<RuleSelector>>,
-    /// Like --select, but adds additional rule codes on top of the selected
-    /// ones.
+    /// Like --select, but adds additional rule codes on top of those already
+    /// specified.
     #[arg(
         long,
         value_delimiter = ',',
@@ -147,9 +159,13 @@ pub struct CheckArgs {
         hide = true
     )]
     pub extend_ignore: Option<Vec<RuleSelector>>,
-    /// List of mappings from file pattern to code to exclude
+    /// List of mappings from file pattern to code to exclude.
     #[arg(long, value_delimiter = ',', help_heading = "Rule selection")]
     pub per_file_ignores: Option<Vec<PatternPrefixPair>>,
+    /// Like `--per-file-ignores`, but adds additional ignores on top of
+    /// those already specified.
+    #[arg(long, value_delimiter = ',', help_heading = "Rule selection")]
+    pub extend_per_file_ignores: Option<Vec<PatternPrefixPair>>,
     /// List of paths, used to omit files and/or directories from analysis.
     #[arg(
         long,
@@ -189,6 +205,27 @@ pub struct CheckArgs {
         hide_possible_values = true
     )]
     pub unfixable: Option<Vec<RuleSelector>>,
+    /// Like --fixable, but adds additional rule codes on top of those already
+    /// specified.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "RULE_CODE",
+        value_parser = parse_rule_selector,
+        help_heading = "Rule selection",
+        hide_possible_values = true
+    )]
+    pub extend_fixable: Option<Vec<RuleSelector>>,
+    /// Like --unfixable. (Deprecated: You can just use --unfixable instead.)
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "RULE_CODE",
+        value_parser = parse_rule_selector,
+        help_heading = "Rule selection",
+        hide = true
+    )]
+    pub extend_unfixable: Option<Vec<RuleSelector>>,
     /// Respect file exclusions via `.gitignore` and other standard ignore
     /// files.
     #[arg(
@@ -240,16 +277,6 @@ pub struct CheckArgs {
     /// autofix, even if no lint violations remain.
     #[arg(long, help_heading = "Miscellaneous", conflicts_with = "exit_zero")]
     pub exit_non_zero_on_fix: bool,
-    /// Does nothing and will be removed in the future.
-    #[arg(
-        long,
-        overrides_with("no_update_check"),
-        help_heading = "Miscellaneous",
-        hide = true
-    )]
-    update_check: bool,
-    #[clap(long, overrides_with("update_check"), hide = true)]
-    no_update_check: bool,
     /// Show counts for every rule with at least one violation.
     #[arg(
         long,
@@ -301,6 +328,9 @@ pub struct CheckArgs {
         conflicts_with = "watch",
     )]
     pub show_settings: bool,
+    /// Dev-only argument to show fixes
+    #[arg(long, hide = true)]
+    pub ecosystem_ci: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -365,12 +395,14 @@ impl CheckArgs {
                 add_noqa: self.add_noqa,
                 config: self.config,
                 diff: self.diff,
-                exit_zero: self.exit_zero,
+                ecosystem_ci: self.ecosystem_ci,
                 exit_non_zero_on_fix: self.exit_non_zero_on_fix,
+                exit_zero: self.exit_zero,
                 files: self.files,
                 ignore_noqa: self.ignore_noqa,
                 isolated: self.isolated,
                 no_cache: self.no_cache,
+                output_file: self.output_file,
                 show_files: self.show_files,
                 show_settings: self.show_settings,
                 statistics: self.statistics,
@@ -381,8 +413,10 @@ impl CheckArgs {
                 dummy_variable_rgx: self.dummy_variable_rgx,
                 exclude: self.exclude,
                 extend_exclude: self.extend_exclude,
+                extend_fixable: self.extend_fixable,
                 extend_ignore: self.extend_ignore,
                 extend_select: self.extend_select,
+                extend_unfixable: self.extend_unfixable,
                 fixable: self.fixable,
                 ignore: self.ignore,
                 line_length: self.line_length,
@@ -402,7 +436,6 @@ impl CheckArgs {
                 force_exclude: resolve_bool_arg(self.force_exclude, self.no_force_exclude),
                 format: self.format,
                 show_fixes: resolve_bool_arg(self.show_fixes, self.no_show_fixes),
-                update_check: resolve_bool_arg(self.update_check, self.no_update_check),
             },
         )
     }
@@ -429,12 +462,14 @@ pub struct Arguments {
     pub add_noqa: bool,
     pub config: Option<PathBuf>,
     pub diff: bool,
-    pub exit_zero: bool,
+    pub ecosystem_ci: bool,
     pub exit_non_zero_on_fix: bool,
+    pub exit_zero: bool,
     pub files: Vec<PathBuf>,
     pub ignore_noqa: bool,
     pub isolated: bool,
     pub no_cache: bool,
+    pub output_file: Option<PathBuf>,
     pub show_files: bool,
     pub show_settings: bool,
     pub statistics: bool,
@@ -449,8 +484,10 @@ pub struct Overrides {
     pub dummy_variable_rgx: Option<Regex>,
     pub exclude: Option<Vec<FilePattern>>,
     pub extend_exclude: Option<Vec<FilePattern>>,
+    pub extend_fixable: Option<Vec<RuleSelector>>,
     pub extend_ignore: Option<Vec<RuleSelector>>,
     pub extend_select: Option<Vec<RuleSelector>>,
+    pub extend_unfixable: Option<Vec<RuleSelector>>,
     pub fixable: Option<Vec<RuleSelector>>,
     pub ignore: Option<Vec<RuleSelector>>,
     pub line_length: Option<usize>,
@@ -467,7 +504,6 @@ pub struct Overrides {
     pub force_exclude: Option<bool>,
     pub format: Option<SerializationFormat>,
     pub show_fixes: Option<bool>,
-    pub update_check: Option<bool>,
 }
 
 impl ConfigProcessor for &Overrides {
@@ -501,7 +537,14 @@ impl ConfigProcessor for &Overrides {
                 .collect(),
             extend_select: self.extend_select.clone().unwrap_or_default(),
             fixable: self.fixable.clone(),
-            unfixable: self.unfixable.clone().unwrap_or_default(),
+            unfixable: self
+                .unfixable
+                .iter()
+                .cloned()
+                .chain(self.extend_unfixable.iter().cloned())
+                .flatten()
+                .collect(),
+            extend_fixable: self.extend_fixable.clone().unwrap_or_default(),
         });
         if let Some(format) = &self.format {
             config.format = Some(*format);
@@ -510,7 +553,7 @@ impl ConfigProcessor for &Overrides {
             config.force_exclude = Some(*force_exclude);
         }
         if let Some(line_length) = &self.line_length {
-            config.line_length = Some(*line_length);
+            config.line_length = Some(LineLength::from(*line_length));
         }
         if let Some(per_file_ignores) = &self.per_file_ignores {
             config.per_file_ignores = Some(collect_per_file_ignores(per_file_ignores.clone()));
@@ -526,9 +569,6 @@ impl ConfigProcessor for &Overrides {
         }
         if let Some(target_version) = &self.target_version {
             config.target_version = Some(*target_version);
-        }
-        if let Some(update_check) = &self.update_check {
-            config.update_check = Some(*update_check);
         }
     }
 }

@@ -2,20 +2,21 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use rustpython_parser::ast::{StmtKind, Suite};
+use rustpython_parser::ast::{self, Ranged, Stmt, Suite};
 
 use ruff_diagnostics::Diagnostic;
 use ruff_python_ast::helpers::to_module_path;
 use ruff_python_ast::imports::{ImportMap, ModuleImport};
 use ruff_python_ast::source_code::{Indexer, Locator, Stylist};
-use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::statement_visitor::StatementVisitor;
 use ruff_python_stdlib::path::is_python_stub_file;
 
 use crate::directives::IsortDirectives;
 use crate::registry::Rule;
 use crate::rules::isort;
-use crate::rules::isort::track::{Block, ImportTracker};
-use crate::settings::{flags, Settings};
+use crate::rules::isort::block::{Block, BlockBuilder};
+use crate::settings::Settings;
+use crate::source_kind::SourceKind;
 
 fn extract_import_map(path: &Path, package: Option<&Path>, blocks: &[&Block]) -> Option<ImportMap> {
     let Some(package) = package else {
@@ -28,23 +29,23 @@ fn extract_import_map(path: &Path, package: Option<&Path>, blocks: &[&Block]) ->
     let num_imports = blocks.iter().map(|block| block.imports.len()).sum();
     let mut module_imports = Vec::with_capacity(num_imports);
     for stmt in blocks.iter().flat_map(|block| &block.imports) {
-        match &stmt.node {
-            StmtKind::Import { names } => {
-                module_imports.extend(names.iter().map(|name| {
-                    ModuleImport::new(
-                        name.node.name.clone(),
-                        stmt.location,
-                        stmt.end_location.unwrap(),
-                    )
-                }));
+        match stmt {
+            Stmt::Import(ast::StmtImport { names, range: _ }) => {
+                module_imports.extend(
+                    names
+                        .iter()
+                        .map(|name| ModuleImport::new(name.name.to_string(), stmt.range())),
+                );
             }
-            StmtKind::ImportFrom {
+            Stmt::ImportFrom(ast::StmtImportFrom {
                 module,
                 names,
                 level,
-            } => {
-                let level = level.unwrap_or(0);
+                range: _,
+            }) => {
+                let level = level.map_or(0, |level| level.to_usize());
                 let module = if let Some(module) = module {
+                    let module: &String = module.as_ref();
                     if level == 0 {
                         Cow::Borrowed(module)
                     } else {
@@ -61,14 +62,10 @@ fn extract_import_map(path: &Path, package: Option<&Path>, blocks: &[&Block]) ->
                     Cow::Owned(module_path[..module_path.len() - level].join("."))
                 };
                 module_imports.extend(names.iter().map(|name| {
-                    ModuleImport::new(
-                        format!("{}.{}", module, name.node.name),
-                        name.location,
-                        name.end_location.unwrap(),
-                    )
+                    ModuleImport::new(format!("{}.{}", module, name.name), name.range())
                 }));
             }
-            _ => panic!("Expected StmtKind::Import | StmtKind::ImportFrom"),
+            _ => panic!("Expected Stmt::Import | Stmt::ImportFrom"),
         }
     }
 
@@ -78,22 +75,22 @@ fn extract_import_map(path: &Path, package: Option<&Path>, blocks: &[&Block]) ->
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn check_imports(
+pub(crate) fn check_imports(
     python_ast: &Suite,
     locator: &Locator,
     indexer: &Indexer,
     directives: &IsortDirectives,
     settings: &Settings,
     stylist: &Stylist,
-    autofix: flags::Autofix,
     path: &Path,
     package: Option<&Path>,
+    source_kind: Option<&SourceKind>,
 ) -> (Vec<Diagnostic>, Option<ImportMap>) {
     let is_stub = is_python_stub_file(path);
 
-    // Extract all imports from the AST.
+    // Extract all import blocks from the AST.
     let tracker = {
-        let mut tracker = ImportTracker::new(locator, directives, is_stub);
+        let mut tracker = BlockBuilder::new(locator, directives, is_stub, source_kind);
         tracker.visit_body(python_ast);
         tracker
     };
@@ -105,7 +102,7 @@ pub fn check_imports(
         for block in &blocks {
             if !block.imports.is_empty() {
                 if let Some(diagnostic) = isort::rules::organize_imports(
-                    block, locator, stylist, indexer, settings, autofix, package,
+                    block, locator, stylist, indexer, settings, package,
                 ) {
                     diagnostics.push(diagnostic);
                 }
@@ -114,7 +111,7 @@ pub fn check_imports(
     }
     if settings.rules.enabled(Rule::MissingRequiredImport) {
         diagnostics.extend(isort::rules::add_required_imports(
-            &blocks, python_ast, locator, stylist, settings, autofix, is_stub,
+            python_ast, locator, stylist, settings, is_stub,
         ));
     }
 

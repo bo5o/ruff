@@ -1,17 +1,48 @@
-use rustpython_parser::ast::Expr;
+use rustpython_parser::ast::{Expr, Ranged};
 
-use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Violation};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
-use ruff_python_ast::typing::AnnotationKind;
+use ruff_python_ast::call_path::compose_call_path;
+use ruff_python_semantic::analyze::typing::ModuleMember;
 
 use crate::checkers::ast::Checker;
+use crate::importer::ImportRequest;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for the use of generics that can be replaced with standard library
+/// variants based on [PEP 585].
+///
+/// ## Why is this bad?
+/// [PEP 585] enabled collections in the Python standard library (like `list`)
+/// to be used as generics directly, instead of importing analogous members
+/// from the `typing` module (like `typing.List`).
+///
+/// When available, the [PEP 585] syntax should be used instead of importing
+/// members from the `typing` module, as it's more concise and readable.
+/// Importing those members from `typing` is considered deprecated as of PEP
+/// 585.
+///
+/// ## Example
+/// ```python
+/// from typing import List
+///
+/// foo: List[int] = [1, 2, 3]
+/// ```
+///
+/// Use instead:
+/// ```python
+/// foo: list[int] = [1, 2, 3]
+/// ```
+///
+/// ## Options
+/// - `target-version`
+///
+/// [PEP 585]: https://peps.python.org/pep-0585/
 #[violation]
 pub struct NonPEP585Annotation {
-    pub name: String,
-    pub fixable: bool,
+    from: String,
+    to: String,
 }
 
 impl Violation for NonPEP585Annotation {
@@ -19,50 +50,58 @@ impl Violation for NonPEP585Annotation {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let NonPEP585Annotation { name, .. } = self;
-        format!(
-            "Use `{}` instead of `{}` for type annotations",
-            name.to_lowercase(),
-            name,
-        )
+        let NonPEP585Annotation { from, to } = self;
+        format!("Use `{to}` instead of `{from}` for type annotation")
     }
 
-    fn autofix_title_formatter(&self) -> Option<fn(&Self) -> String> {
-        self.fixable.then_some(|NonPEP585Annotation { name, .. }| {
-            format!("Replace `{name}` with `{}`", name.to_lowercase())
-        })
+    fn autofix_title(&self) -> Option<String> {
+        let NonPEP585Annotation { to, .. } = self;
+        Some(format!("Replace with `{to}`"))
     }
 }
 
 /// UP006
-pub fn use_pep585_annotation(checker: &mut Checker, expr: &Expr) {
-    if let Some(binding) = checker
-        .ctx
-        .resolve_call_path(expr)
-        .and_then(|call_path| call_path.last().copied())
-    {
-        let fixable = checker
-            .ctx
-            .in_deferred_string_type_definition
-            .as_ref()
-            .map_or(true, AnnotationKind::is_simple);
-        let mut diagnostic = Diagnostic::new(
-            NonPEP585Annotation {
-                name: binding.to_string(),
-                fixable,
-            },
-            Range::from(expr),
-        );
-        if fixable && checker.patch(diagnostic.kind.rule()) {
-            let binding = binding.to_lowercase();
-            if checker.ctx.is_builtin(&binding) {
-                diagnostic.set_fix(Edit::replacement(
-                    binding,
-                    expr.location,
-                    expr.end_location.unwrap(),
-                ));
+pub(crate) fn use_pep585_annotation(
+    checker: &mut Checker,
+    expr: &Expr,
+    replacement: &ModuleMember,
+) {
+    let Some(from) = compose_call_path(expr) else {
+        return;
+    };
+    let mut diagnostic = Diagnostic::new(
+        NonPEP585Annotation {
+            from,
+            to: replacement.to_string(),
+        },
+        expr.range(),
+    );
+    if checker.patch(diagnostic.kind.rule()) {
+        if !checker.semantic().in_complex_string_type_definition() {
+            match replacement {
+                ModuleMember::BuiltIn(name) => {
+                    // Built-in type, like `list`.
+                    if checker.semantic().is_builtin(name) {
+                        diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                            (*name).to_string(),
+                            expr.range(),
+                        )));
+                    }
+                }
+                ModuleMember::Member(module, member) => {
+                    // Imported type, like `collections.deque`.
+                    diagnostic.try_set_fix(|| {
+                        let (import_edit, binding) = checker.importer.get_or_import_symbol(
+                            &ImportRequest::import_from(module, member),
+                            expr.start(),
+                            checker.semantic(),
+                        )?;
+                        let reference_edit = Edit::range_replacement(binding, expr.range());
+                        Ok(Fix::suggested_edits(import_edit, [reference_edit]))
+                    });
+                }
             }
         }
-        checker.diagnostics.push(diagnostic);
     }
+    checker.diagnostics.push(diagnostic);
 }

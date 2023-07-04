@@ -21,6 +21,13 @@ def test_error():
     assert something and something_else == """error
     message
     """
+    assert (
+        something
+        and something_else
+        == """error
+message
+"""
+    )
 
     # recursive case
     assert not (a or not (b or c))
@@ -31,11 +38,8 @@ def test_error():
     assert not (something or something_else and something_third), "with message"
     # detected, but no autofix for mixed conditions (e.g. `a or b and c`)
     assert not (something or something_else and something_third)
-    # detected, but no autofix for parenthesized conditions
-    assert (
-        something
-        and something_else
-        == """error
-message
-"""
-    )
+
+
+assert something  # OK
+assert something and something_else  # Error
+assert something and something_else and something_third  # Error

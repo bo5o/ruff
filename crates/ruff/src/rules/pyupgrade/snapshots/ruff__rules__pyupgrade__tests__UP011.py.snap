@@ -1,16 +1,16 @@
 ---
 source: crates/ruff/src/rules/pyupgrade/mod.rs
 ---
-UP011.py:5:21: UP011 [*] Unnecessary parameters to `functools.lru_cache`
+UP011.py:5:21: UP011 [*] Unnecessary parentheses to `functools.lru_cache`
   |
 5 | @functools.lru_cache()
   |                     ^^ UP011
 6 | def fixme():
 7 |     pass
   |
-  = help: Remove unnecessary parameters
+  = help: Remove unnecessary parentheses
 
-ℹ Suggested fix
+ℹ Fix
 2 2 | from functools import lru_cache
 3 3 | 
 4 4 | 
@@ -20,16 +20,16 @@ UP011.py:5:21: UP011 [*] Unnecessary parameters to `functools.lru_cache`
 7 7 |     pass
 8 8 | 
 
-UP011.py:10:11: UP011 [*] Unnecessary parameters to `functools.lru_cache`
+UP011.py:10:11: UP011 [*] Unnecessary parentheses to `functools.lru_cache`
    |
 10 | @lru_cache()
    |           ^^ UP011
 11 | def fixme():
 12 |     pass
    |
-   = help: Remove unnecessary parameters
+   = help: Remove unnecessary parentheses
 
-ℹ Suggested fix
+ℹ Fix
 7  7  |     pass
 8  8  | 
 9  9  | 
@@ -39,17 +39,17 @@ UP011.py:10:11: UP011 [*] Unnecessary parameters to `functools.lru_cache`
 12 12 |     pass
 13 13 | 
 
-UP011.py:16:21: UP011 [*] Unnecessary parameters to `functools.lru_cache`
+UP011.py:16:21: UP011 [*] Unnecessary parentheses to `functools.lru_cache`
    |
-16 | @other_decorator
-17 | @functools.lru_cache()
+15 | @other_decorator
+16 | @functools.lru_cache()
    |                     ^^ UP011
-18 | def fixme():
-19 |     pass
+17 | def fixme():
+18 |     pass
    |
-   = help: Remove unnecessary parameters
+   = help: Remove unnecessary parentheses
 
-ℹ Suggested fix
+ℹ Fix
 13 13 | 
 14 14 | 
 15 15 | @other_decorator
@@ -59,16 +59,16 @@ UP011.py:16:21: UP011 [*] Unnecessary parameters to `functools.lru_cache`
 18 18 |     pass
 19 19 | 
 
-UP011.py:21:21: UP011 [*] Unnecessary parameters to `functools.lru_cache`
+UP011.py:21:21: UP011 [*] Unnecessary parentheses to `functools.lru_cache`
    |
 21 | @functools.lru_cache()
    |                     ^^ UP011
 22 | @other_decorator
 23 | def fixme():
    |
-   = help: Remove unnecessary parameters
+   = help: Remove unnecessary parentheses
 
-ℹ Suggested fix
+ℹ Fix
 18 18 |     pass
 19 19 | 
 20 20 | 

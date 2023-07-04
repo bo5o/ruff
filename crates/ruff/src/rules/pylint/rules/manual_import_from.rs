@@ -1,18 +1,35 @@
-use rustpython_parser::ast::{Alias, AliasData, Located, Stmt, StmtKind};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, Alias, Identifier, Int, Ranged, Stmt};
 
-use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Violation};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::{create_stmt, unparse_stmt};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for submodule imports that are aliased to the submodule name.
+///
+/// ## Why is this bad?
+/// Using the `from` keyword to import the submodule is more concise and
+/// readable.
+///
+/// ## Example
+/// ```python
+/// import concurrent.futures as futures
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from concurrent import futures
+/// ```
+///
+/// ## References
+/// - [Python documentation: Submodules](https://docs.python.org/3/reference/import.html#submodules)
 #[violation]
 pub struct ManualFromImport {
-    pub module: String,
-    pub name: String,
-    pub fixable: bool,
+    module: String,
+    name: String,
 }
 
 impl Violation for ManualFromImport {
@@ -20,59 +37,57 @@ impl Violation for ManualFromImport {
 
     #[derive_message_formats]
     fn message(&self) -> String {
-        let ManualFromImport { module, name, .. } = self;
+        let ManualFromImport { module, name } = self;
         format!("Use `from {module} import {name}` in lieu of alias")
     }
 
-    fn autofix_title_formatter(&self) -> Option<fn(&Self) -> String> {
-        self.fixable
-            .then_some(|ManualFromImport { module, name, .. }| {
-                format!("Replace with `from {module} import {name}`")
-            })
+    fn autofix_title(&self) -> Option<String> {
+        let ManualFromImport { module, name } = self;
+        Some(format!("Replace with `from {module} import {name}`"))
     }
 }
 
 /// PLR0402
-pub fn manual_from_import(checker: &mut Checker, stmt: &Stmt, alias: &Alias, names: &[Alias]) {
-    let Some(asname) = &alias.node.asname else {
+pub(crate) fn manual_from_import(
+    checker: &mut Checker,
+    stmt: &Stmt,
+    alias: &Alias,
+    names: &[Alias],
+) {
+    let Some(asname) = &alias.asname else {
         return;
     };
-    let Some((module, name)) = alias.node.name.rsplit_once('.') else {
+    let Some((module, name)) = alias.name.rsplit_once('.') else {
         return;
     };
-    if name != asname {
+    if asname != name {
         return;
     }
 
-    let fixable = names.len() == 1;
     let mut diagnostic = Diagnostic::new(
         ManualFromImport {
             module: module.to_string(),
             name: name.to_string(),
-            fixable,
         },
-        Range::from(alias),
+        alias.range(),
     );
-    if fixable && checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            unparse_stmt(
-                &create_stmt(StmtKind::ImportFrom {
-                    module: Some(module.to_string()),
-                    names: vec![Located::new(
-                        stmt.location,
-                        stmt.end_location.unwrap(),
-                        AliasData {
-                            name: asname.into(),
-                            asname: None,
-                        },
-                    )],
-                    level: Some(0),
-                }),
-                checker.stylist,
-            ),
-            stmt.location,
-            stmt.end_location.unwrap(),
-        ));
+    if checker.patch(diagnostic.kind.rule()) {
+        if names.len() == 1 {
+            let node = ast::StmtImportFrom {
+                module: Some(Identifier::new(module.to_string(), TextRange::default())),
+                names: vec![Alias {
+                    name: asname.clone(),
+                    asname: None,
+                    range: TextRange::default(),
+                }],
+                level: Some(Int::new(0)),
+                range: TextRange::default(),
+            };
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                checker.generator().stmt(&node.into()),
+                stmt.range(),
+            )));
+        }
     }
     checker.diagnostics.push(diagnostic);
 }

@@ -3,15 +3,16 @@ use ruff_macros::CacheKey;
 use std::fmt::{Debug, Formatter};
 use std::iter::FusedIterator;
 
+const RULESET_SIZE: usize = 11;
+
 /// A set of [`Rule`]s.
 ///
 /// Uses a bitset where a bit of one signals that the Rule with that [u16] is in this set.
 #[derive(Clone, Default, CacheKey, PartialEq, Eq)]
-pub struct RuleSet([u64; 9]);
+pub struct RuleSet([u64; RULESET_SIZE]);
 
 impl RuleSet {
-    const EMPTY: [u64; 9] = [0; 9];
-
+    const EMPTY: [u64; RULESET_SIZE] = [0; RULESET_SIZE];
     // 64 fits into a u16 without truncation
     #[allow(clippy::cast_possible_truncation)]
     const SLICE_BITS: u16 = u64::BITS as u16;
@@ -252,7 +253,7 @@ impl RuleSet {
     ///
     /// let iter: Vec<_> = set.iter().collect();
     ///
-    /// assert_eq!(iter, vec![Rule::AmbiguousFunctionName, Rule::AnyType]);
+    /// assert_eq!(iter, vec![Rule::AnyType, Rule::AmbiguousFunctionName]);
     /// ```
     pub fn iter(&self) -> RuleSetIterator {
         RuleSetIterator {
@@ -288,8 +289,8 @@ impl Extend<Rule> for RuleSet {
 }
 
 impl IntoIterator for RuleSet {
-    type Item = Rule;
     type IntoIter = RuleSetIterator;
+    type Item = Rule;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -297,8 +298,8 @@ impl IntoIterator for RuleSet {
 }
 
 impl IntoIterator for &RuleSet {
-    type Item = Rule;
     type IntoIter = RuleSetIterator;
+    type Item = Rule;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()

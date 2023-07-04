@@ -1,16 +1,16 @@
 ---
 source: crates/ruff/src/rules/flake8_pytest_style/mod.rs
 ---
-PT001.py:9:2: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
+PT001.py:9:1: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
    |
  9 | @pytest.fixture
-   |  ^^^^^^^^^^^^^^ PT001
+   | ^^^^^^^^^^^^^^^ PT001
 10 | def no_parentheses():
 11 |     return 42
    |
-   = help: Add/remove parentheses
+   = help: Add parentheses
 
-ℹ Suggested fix
+ℹ Fix
 6  6  | # `import pytest`
 7  7  | 
 8  8  | 
@@ -20,16 +20,16 @@ PT001.py:9:2: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
 11 11 |     return 42
 12 12 | 
 
-PT001.py:34:2: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
+PT001.py:34:1: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
    |
 34 | @fixture
-   |  ^^^^^^^ PT001
+   | ^^^^^^^^ PT001
 35 | def imported_from_no_parentheses():
 36 |     return 42
    |
-   = help: Add/remove parentheses
+   = help: Add parentheses
 
-ℹ Suggested fix
+ℹ Fix
 31 31 | # `from pytest import fixture`
 32 32 | 
 33 33 | 
@@ -39,16 +39,16 @@ PT001.py:34:2: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
 36 36 |     return 42
 37 37 | 
 
-PT001.py:59:2: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
+PT001.py:59:1: PT001 [*] Use `@pytest.fixture()` over `@pytest.fixture`
    |
 59 | @aliased
-   |  ^^^^^^^ PT001
+   | ^^^^^^^^ PT001
 60 | def aliased_no_parentheses():
 61 |     return 42
    |
-   = help: Add/remove parentheses
+   = help: Add parentheses
 
-ℹ Suggested fix
+ℹ Fix
 56 56 | # `from pytest import fixture as aliased`
 57 57 | 
 58 58 | 

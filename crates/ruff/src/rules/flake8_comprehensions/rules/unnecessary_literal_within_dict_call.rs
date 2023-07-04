@@ -1,9 +1,9 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
 use std::fmt;
+
+use rustpython_parser::ast::{Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -12,7 +12,7 @@ use crate::rules::flake8_comprehensions::fixes;
 use super::helpers;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum DictKind {
+pub(crate) enum DictKind {
     Literal,
     Comprehension,
 }
@@ -30,7 +30,7 @@ impl fmt::Display for DictKind {
 /// Checks for `dict` calls that take unnecessary `dict` literals or `dict`
 /// comprehensions as arguments.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// It's unnecessary to wrap a `dict` literal or comprehension within a `dict`
 /// call, since the literal or comprehension syntax already returns a `dict`.
 ///
@@ -47,7 +47,7 @@ impl fmt::Display for DictKind {
 /// ```
 #[violation]
 pub struct UnnecessaryLiteralWithinDictCall {
-    pub kind: DictKind,
+    kind: DictKind,
 }
 
 impl AlwaysAutofixableViolation for UnnecessaryLiteralWithinDictCall {
@@ -63,7 +63,7 @@ impl AlwaysAutofixableViolation for UnnecessaryLiteralWithinDictCall {
 }
 
 /// C418
-pub fn unnecessary_literal_within_dict_call(
+pub(crate) fn unnecessary_literal_within_dict_call(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
@@ -76,22 +76,23 @@ pub fn unnecessary_literal_within_dict_call(
     let Some(argument) = helpers::first_argument_with_matching_function("dict", func, args) else {
         return;
     };
-    if !checker.ctx.is_builtin("dict") {
+    if !checker.semantic().is_builtin("dict") {
         return;
     }
     let argument_kind = match argument {
-        ExprKind::DictComp { .. } => DictKind::Comprehension,
-        ExprKind::Dict { .. } => DictKind::Literal,
+        Expr::DictComp(_) => DictKind::Comprehension,
+        Expr::Dict(_) => DictKind::Literal,
         _ => return,
     };
     let mut diagnostic = Diagnostic::new(
         UnnecessaryLiteralWithinDictCall {
             kind: argument_kind,
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
+        #[allow(deprecated)]
+        diagnostic.try_set_fix_from_edit(|| {
             fixes::fix_unnecessary_literal_within_dict_call(checker.locator, checker.stylist, expr)
         });
     }

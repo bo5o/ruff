@@ -1,7 +1,7 @@
 use crate::format_element::tag::TagKind;
 use crate::format_element::PrintMode;
 use crate::printer::stack::{Stack, StackedStack};
-use crate::printer::Indention;
+use crate::printer::{Indention, MeasureMode};
 use crate::{IndentStyle, InvalidDocumentError, PrintError, PrintResult};
 use std::fmt::Debug;
 use std::num::NonZeroU8;
@@ -28,10 +28,11 @@ pub(super) struct StackFrame {
 pub(super) struct PrintElementArgs {
     indent: Indention,
     mode: PrintMode,
+    measure_mode: MeasureMode,
 }
 
 impl PrintElementArgs {
-    pub fn new(indent: Indention) -> Self {
+    pub(crate) fn new(indent: Indention) -> Self {
         Self {
             indent,
             ..Self::default()
@@ -42,32 +43,41 @@ impl PrintElementArgs {
         self.mode
     }
 
+    pub(super) fn measure_mode(&self) -> MeasureMode {
+        self.measure_mode
+    }
+
     pub(super) fn indention(&self) -> Indention {
         self.indent
     }
 
-    pub fn increment_indent_level(mut self, indent_style: IndentStyle) -> Self {
+    pub(crate) fn increment_indent_level(mut self, indent_style: IndentStyle) -> Self {
         self.indent = self.indent.increment_level(indent_style);
         self
     }
 
-    pub fn decrement_indent(mut self) -> Self {
+    pub(crate) fn decrement_indent(mut self) -> Self {
         self.indent = self.indent.decrement();
         self
     }
 
-    pub fn reset_indent(mut self) -> Self {
+    pub(crate) fn reset_indent(mut self) -> Self {
         self.indent = Indention::default();
         self
     }
 
-    pub fn set_indent_align(mut self, count: NonZeroU8) -> Self {
+    pub(crate) fn set_indent_align(mut self, count: NonZeroU8) -> Self {
         self.indent = self.indent.set_align(count);
         self
     }
 
-    pub fn with_print_mode(mut self, mode: PrintMode) -> Self {
+    pub(crate) fn with_print_mode(mut self, mode: PrintMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub(crate) fn with_measure_mode(mut self, mode: MeasureMode) -> Self {
+        self.measure_mode = mode;
         self
     }
 }
@@ -77,6 +87,7 @@ impl Default for PrintElementArgs {
         Self {
             indent: Indention::Level(0),
             mode: PrintMode::Expanded,
+            measure_mode: MeasureMode::FirstLine,
         }
     }
 }

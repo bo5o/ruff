@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::fmt::Write;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -5,28 +7,30 @@ use std::time::Instant;
 use anyhow::Result;
 use colored::Colorize;
 use ignore::Error;
+use itertools::Itertools;
 use log::{debug, error, warn};
 #[cfg(not(target_family = "wasm"))]
 use rayon::prelude::*;
+use ruff_text_size::{TextRange, TextSize};
 
-use ruff::message::{Location, Message};
+use ruff::message::Message;
 use ruff::registry::Rule;
-use ruff::resolver::PyprojectDiscovery;
+use ruff::resolver::{PyprojectConfig, PyprojectDiscoveryStrategy};
 use ruff::settings::{flags, AllSettings};
-use ruff::{fs, packaging, resolver, warn_user_once, IOError, Range};
+use ruff::{fs, packaging, resolver, warn_user_once, IOError};
 use ruff_diagnostics::Diagnostic;
 use ruff_python_ast::imports::ImportMap;
 use ruff_python_ast::source_code::SourceFileBuilder;
 
 use crate::args::Overrides;
-use crate::cache;
+use crate::cache::{self, Cache};
 use crate::diagnostics::Diagnostics;
 use crate::panic::catch_unwind;
 
 /// Run the linter over a collection of files.
-pub fn run(
+pub(crate) fn run(
     files: &[PathBuf],
-    pyproject_strategy: &PyprojectDiscovery,
+    pyproject_config: &PyprojectConfig,
     overrides: &Overrides,
     cache: flags::Cache,
     noqa: flags::Noqa,
@@ -34,7 +38,7 @@ pub fn run(
 ) -> Result<Diagnostics> {
     // Collect all the Python files to check.
     let start = Instant::now();
-    let (paths, resolver) = resolver::python_files_in_path(files, pyproject_strategy, overrides)?;
+    let (paths, resolver) = resolver::python_files_in_path(files, pyproject_config, overrides)?;
     let duration = start.elapsed();
     debug!("Identified files to lint in: {:?}", duration);
 
@@ -51,12 +55,12 @@ pub fn run(
             }
         }
 
-        match &pyproject_strategy {
-            PyprojectDiscovery::Fixed(settings) => {
-                init_cache(&settings.cli.cache_dir);
+        match pyproject_config.strategy {
+            PyprojectDiscoveryStrategy::Fixed => {
+                init_cache(&pyproject_config.settings.cli.cache_dir);
             }
-            PyprojectDiscovery::Hierarchical(default) => {
-                for settings in std::iter::once(default).chain(resolver.iter()) {
+            PyprojectDiscoveryStrategy::Hierarchical => {
+                for settings in std::iter::once(&pyproject_config.settings).chain(resolver.iter()) {
                     init_cache(&settings.cli.cache_dir);
                 }
             }
@@ -71,8 +75,27 @@ pub fn run(
             .map(ignore::DirEntry::path)
             .collect::<Vec<_>>(),
         &resolver,
-        pyproject_strategy,
+        pyproject_config,
     );
+
+    // Load the caches.
+    let caches = bool::from(cache).then(|| {
+        package_roots
+            .iter()
+            .map(|(package, package_root)| package_root.unwrap_or(package))
+            .unique()
+            .par_bridge()
+            .map(|cache_root| {
+                let settings = resolver.resolve_all(cache_root, pyproject_config);
+                let cache = Cache::open(
+                    &settings.cli.cache_dir,
+                    cache_root.to_path_buf(),
+                    &settings.lib,
+                );
+                (cache_root, cache)
+            })
+            .collect::<HashMap<&Path, Cache>>()
+    });
 
     let start = Instant::now();
     let mut diagnostics: Diagnostics = paths
@@ -85,13 +108,24 @@ pub fn run(
                         .parent()
                         .and_then(|parent| package_roots.get(parent))
                         .and_then(|package| *package);
-                    let settings = resolver.resolve_all(path, pyproject_strategy);
+
+                    let settings = resolver.resolve_all(path, pyproject_config);
+
+                    let cache_root = package.unwrap_or_else(|| path.parent().unwrap_or(path));
+                    let cache = caches.as_ref().and_then(|caches| {
+                        if let Some(cache) = caches.get(&cache_root) {
+                            Some(cache)
+                        } else {
+                            debug!("No cache found for {}", cache_root.display());
+                            None
+                        }
+                    });
 
                     lint_path(path, package, settings, cache, noqa, autofix).map_err(|e| {
                         (Some(path.to_owned()), {
                             let mut error = e.to_string();
                             for cause in e.chain() {
-                                error += &format!("\n  Caused by: {cause}");
+                                write!(&mut error, "\n  Caused by: {cause}").unwrap();
                             }
                             error
                         })
@@ -115,18 +149,16 @@ pub fn run(
                         fs::relativize_path(path).bold(),
                         ":".bold()
                     );
-                    let settings = resolver.resolve(path, pyproject_strategy);
+                    let settings = resolver.resolve(path, pyproject_config);
                     if settings.rules.enabled(Rule::IOError) {
-                        let file = SourceFileBuilder::new(&path.to_string_lossy()).finish();
+                        let file =
+                            SourceFileBuilder::new(path.to_string_lossy().as_ref(), "").finish();
 
                         Diagnostics::new(
                             vec![Message::from_diagnostic(
-                                Diagnostic::new(
-                                    IOError { message },
-                                    Range::new(Location::default(), Location::default()),
-                                ),
+                                Diagnostic::new(IOError { message }, TextRange::default()),
                                 file,
-                                1,
+                                TextSize::default(),
                             )],
                             ImportMap::default(),
                         )
@@ -144,7 +176,15 @@ pub fn run(
             acc
         });
 
-    diagnostics.messages.sort_unstable();
+    diagnostics.messages.sort();
+
+    // Store the caches.
+    if let Some(caches) = caches {
+        caches
+            .into_par_iter()
+            .try_for_each(|(_, cache)| cache.store())?;
+    }
+
     let duration = start.elapsed();
     debug!("Checked {:?} files in: {:?}", paths.len(), duration);
 
@@ -157,7 +197,7 @@ fn lint_path(
     path: &Path,
     package: Option<&Path>,
     settings: &AllSettings,
-    cache: flags::Cache,
+    cache: Option<&Cache>,
     noqa: flags::Noqa,
     autofix: flags::FixMode,
 ) -> Result<Diagnostics> {
@@ -170,7 +210,7 @@ fn lint_path(
         Err(error) => {
             let message = r#"This indicates a bug in `ruff`. If you could open an issue at:
 
-https://github.com/charliermarsh/ruff/issues/new?title=%5BLinter%20panic%5D
+https://github.com/astral-sh/ruff/issues/new?title=%5BLinter%20panic%5D
 
 with the relevant file contents, the `pyproject.toml` settings, and the following stack trace, we'd be very appreciative!
 "#;
@@ -184,91 +224,5 @@ with the relevant file contents, the `pyproject.toml` settings, and the followin
 
             Ok(Diagnostics::default())
         }
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "jupyter_notebook")]
-mod test {
-    use std::path::PathBuf;
-    use std::str::FromStr;
-
-    use anyhow::Result;
-    use path_absolutize::Absolutize;
-
-    use ruff::logging::LogLevel;
-    use ruff::resolver::PyprojectDiscovery;
-    use ruff::settings::configuration::{Configuration, RuleSelection};
-    use ruff::settings::flags::FixMode;
-    use ruff::settings::flags::{Cache, Noqa};
-    use ruff::settings::types::SerializationFormat;
-    use ruff::settings::AllSettings;
-    use ruff::RuleSelector;
-
-    use crate::args::Overrides;
-    use crate::printer::{Flags, Printer};
-
-    use super::run;
-
-    #[test]
-    fn test_jupyter_notebook_integration() -> Result<()> {
-        let overrides: Overrides = Overrides {
-            select: Some(vec![
-                RuleSelector::from_str("B")?,
-                RuleSelector::from_str("F")?,
-            ]),
-            ..Default::default()
-        };
-
-        let mut configuration = Configuration::default();
-        configuration.rule_selections.push(RuleSelection {
-            select: Some(vec![
-                RuleSelector::from_str("B")?,
-                RuleSelector::from_str("F")?,
-            ]),
-            ..Default::default()
-        });
-
-        let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("ruff")
-            .join("resources")
-            .join("test")
-            .join("fixtures")
-            .join("jupyter");
-
-        let diagnostics = run(
-            &[root_path.join("valid.ipynb")],
-            &PyprojectDiscovery::Fixed(AllSettings::from_configuration(configuration, &root_path)?),
-            &overrides,
-            Cache::Disabled,
-            Noqa::Enabled,
-            FixMode::None,
-        )?;
-
-        let printer = Printer::new(
-            SerializationFormat::Text,
-            LogLevel::Default,
-            FixMode::None,
-            Flags::SHOW_VIOLATIONS,
-        );
-        let mut writer: Vec<u8> = Vec::new();
-        // Mute the terminal color codes
-        colored::control::set_override(false);
-        printer.write_once(&diagnostics, &mut writer)?;
-        // TODO(konstin): Set jupyter notebooks as none-fixable for now
-        // TODO(konstin) 2: Make jupyter notebooks fixable
-        let expected = format!(
-            "{valid_ipynb}:cell 1:2:5: F841 [*] Local variable `x` is assigned to but never used
-{valid_ipynb}:cell 3:1:24: B006 Do not use mutable data structures for argument defaults
-Found 2 errors.
-[*] 1 potentially fixable with the --fix option.
-",
-            valid_ipynb = root_path.join("valid.ipynb").absolutize()?.display()
-        );
-
-        assert_eq!(expected, String::from_utf8(writer)?);
-
-        Ok(())
     }
 }

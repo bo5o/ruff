@@ -1,10 +1,10 @@
-use rustpython_parser::ast::{Expr, ExprKind, Location};
+use ruff_text_size::{TextRange, TextSize};
+use rustpython_parser::ast::{Expr, Ranged};
 use rustpython_parser::{lexer, Mode, StringKind, Tok};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::source_code::Locator;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -52,77 +52,87 @@ impl AlwaysAutofixableViolation for FStringMissingPlaceholders {
 fn find_useless_f_strings<'a>(
     expr: &'a Expr,
     locator: &'a Locator,
-) -> impl Iterator<Item = (Range, Range)> + 'a {
-    let contents = locator.slice(expr);
-    lexer::lex_located(contents, Mode::Module, expr.location)
+) -> impl Iterator<Item = (TextRange, TextRange)> + 'a {
+    let contents = locator.slice(expr.range());
+    lexer::lex_starts_at(contents, Mode::Module, expr.start())
         .flatten()
-        .filter_map(|(location, tok, end_location)| match tok {
+        .filter_map(|(tok, range)| match tok {
             Tok::String {
                 kind: StringKind::FString | StringKind::RawFString,
                 ..
             } => {
-                let first_char = locator.slice(Range {
-                    location,
-                    end_location: Location::new(location.row(), location.column() + 1),
-                });
+                let first_char =
+                    &locator.contents()[TextRange::at(range.start(), TextSize::from(1))];
                 // f"..."  => f_position = 0
                 // fr"..." => f_position = 0
                 // rf"..." => f_position = 1
-                let f_position = usize::from(!(first_char == "f" || first_char == "F"));
+                let f_position = u32::from(!(first_char == "f" || first_char == "F"));
                 Some((
-                    Range {
-                        location: Location::new(location.row(), location.column() + f_position),
-                        end_location: Location::new(
-                            location.row(),
-                            location.column() + f_position + 1,
-                        ),
-                    },
-                    Range {
-                        location,
-                        end_location,
-                    },
+                    TextRange::at(
+                        range.start() + TextSize::from(f_position),
+                        TextSize::from(1),
+                    ),
+                    range,
                 ))
             }
             _ => None,
         })
 }
 
-fn unescape_f_string(content: &str) -> String {
-    content.replace("{{", "{").replace("}}", "}")
-}
-
-fn fix_f_string_missing_placeholders(
-    prefix_range: &Range,
-    tok_range: &Range,
-    checker: &mut Checker,
-) -> Edit {
-    let content = checker.locator.slice(Range::new(
-        prefix_range.end_location,
-        tok_range.end_location,
-    ));
-    Edit::replacement(
-        unescape_f_string(content),
-        prefix_range.location,
-        tok_range.end_location,
-    )
-}
-
 /// F541
-pub fn f_string_missing_placeholders(expr: &Expr, values: &[Expr], checker: &mut Checker) {
+pub(crate) fn f_string_missing_placeholders(expr: &Expr, values: &[Expr], checker: &mut Checker) {
     if !values
         .iter()
-        .any(|value| matches!(value.node, ExprKind::FormattedValue { .. }))
+        .any(|value| matches!(value, Expr::FormattedValue(_)))
     {
         for (prefix_range, tok_range) in find_useless_f_strings(expr, checker.locator) {
             let mut diagnostic = Diagnostic::new(FStringMissingPlaceholders, tok_range);
             if checker.patch(diagnostic.kind.rule()) {
-                diagnostic.set_fix(fix_f_string_missing_placeholders(
-                    &prefix_range,
-                    &tok_range,
-                    checker,
+                diagnostic.set_fix(convert_f_string_to_regular_string(
+                    prefix_range,
+                    tok_range,
+                    checker.locator,
                 ));
             }
             checker.diagnostics.push(diagnostic);
         }
     }
+}
+
+/// Unescape an f-string body by replacing `{{` with `{` and `}}` with `}`.
+///
+/// In Python, curly-brace literals within f-strings must be escaped by doubling the braces.
+/// When rewriting an f-string to a regular string, we need to unescape any curly-brace literals.
+///  For example, given `{{Hello, world!}}`, return `{Hello, world!}`.
+fn unescape_f_string(content: &str) -> String {
+    content.replace("{{", "{").replace("}}", "}")
+}
+
+/// Generate a [`Fix`] to rewrite an f-string as a regular string.
+fn convert_f_string_to_regular_string(
+    prefix_range: TextRange,
+    tok_range: TextRange,
+    locator: &Locator,
+) -> Fix {
+    // Extract the f-string body.
+    let mut content =
+        unescape_f_string(locator.slice(TextRange::new(prefix_range.end(), tok_range.end())));
+
+    // If the preceding character is equivalent to the quote character, insert a space to avoid a
+    // syntax error. For example, when removing the `f` prefix in `""f""`, rewrite to `"" ""`
+    // instead of `""""`.
+    if locator
+        .slice(TextRange::up_to(prefix_range.start()))
+        .chars()
+        .last()
+        .map_or(false, |char| content.starts_with(char))
+    {
+        content.insert(0, ' ');
+    }
+
+    Fix::automatic(Edit::replacement(
+        content,
+        prefix_range.start(),
+        tok_range.end(),
+    ))
 }

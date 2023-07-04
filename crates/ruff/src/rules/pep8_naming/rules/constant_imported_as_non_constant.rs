@@ -1,9 +1,10 @@
-use rustpython_parser::ast::{Alias, Stmt};
+use rustpython_parser::ast::{Alias, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_stdlib::str;
+
+use crate::settings::types::IdentifierPattern;
 
 /// ## What it does
 /// Checks for constant imports that are aliased to non-constant-style
@@ -31,8 +32,8 @@ use ruff_python_stdlib::str;
 /// [PEP 8]: https://peps.python.org/pep-0008/
 #[violation]
 pub struct ConstantImportedAsNonConstant {
-    pub name: String,
-    pub asname: String,
+    name: String,
+    asname: String,
 }
 
 impl Violation for ConstantImportedAsNonConstant {
@@ -44,21 +45,29 @@ impl Violation for ConstantImportedAsNonConstant {
 }
 
 /// N811
-pub fn constant_imported_as_non_constant(
+pub(crate) fn constant_imported_as_non_constant(
     name: &str,
     asname: &str,
     alias: &Alias,
     stmt: &Stmt,
+    ignore_names: &[IdentifierPattern],
 ) -> Option<Diagnostic> {
-    if str::is_upper(name) && !str::is_upper(asname) {
+    if ignore_names
+        .iter()
+        .any(|ignore_name| ignore_name.matches(name))
+    {
+        return None;
+    }
+
+    if str::is_cased_uppercase(name) && !str::is_cased_uppercase(asname) {
         let mut diagnostic = Diagnostic::new(
             ConstantImportedAsNonConstant {
                 name: name.to_string(),
                 asname: asname.to_string(),
             },
-            Range::from(alias),
+            alias.range(),
         );
-        diagnostic.set_parent(stmt.location);
+        diagnostic.set_parent(stmt.start());
         return Some(diagnostic);
     }
     None

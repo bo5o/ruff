@@ -1,62 +1,63 @@
 //! Generate Python source code from an abstract syntax tree (AST).
 
+use rustpython_ast::ArgWithDefault;
 use std::ops::Deref;
 
+use rustpython_literal::escape::{AsciiEscape, Escape, UnicodeEscape};
 use rustpython_parser::ast::{
-    Alias, Arg, Arguments, Boolop, Cmpop, Comprehension, Constant, ConversionFlag, Excepthandler,
-    ExcepthandlerKind, Expr, ExprKind, MatchCase, Operator, Pattern, PatternKind, Stmt, StmtKind,
-    Suite, Withitem,
+    self, Alias, Arg, Arguments, BoolOp, CmpOp, Comprehension, Constant, ConversionFlag,
+    ExceptHandler, Expr, Identifier, MatchCase, Operator, Pattern, Stmt, Suite, WithItem,
 };
 
-use ruff_rustpython::vendor::{bytes, str};
+use ruff_python_whitespace::LineEnding;
 
-use crate::source_code::stylist::{Indentation, LineEnding, Quote, Stylist};
+use crate::source_code::stylist::{Indentation, Quote, Stylist};
 
 mod precedence {
-    pub const ASSIGN: u8 = 3;
-    pub const ANN_ASSIGN: u8 = 5;
-    pub const AUG_ASSIGN: u8 = 5;
-    pub const EXPR: u8 = 5;
-    pub const YIELD: u8 = 7;
-    pub const YIELD_FROM: u8 = 7;
-    pub const IF: u8 = 9;
-    pub const FOR: u8 = 9;
-    pub const ASYNC_FOR: u8 = 9;
-    pub const WHILE: u8 = 9;
-    pub const RETURN: u8 = 11;
-    pub const SLICE: u8 = 13;
-    pub const SUBSCRIPT: u8 = 13;
-    pub const COMPREHENSION_TARGET: u8 = 19;
-    pub const TUPLE: u8 = 19;
-    pub const FORMATTED_VALUE: u8 = 19;
-    pub const COMMA: u8 = 21;
-    pub const NAMED_EXPR: u8 = 23;
-    pub const ASSERT: u8 = 23;
-    pub const LAMBDA: u8 = 27;
-    pub const IF_EXP: u8 = 27;
-    pub const COMPREHENSION: u8 = 29;
-    pub const OR: u8 = 31;
-    pub const AND: u8 = 33;
-    pub const NOT: u8 = 35;
-    pub const CMP: u8 = 37;
-    pub const BIT_OR: u8 = 39;
-    pub const BIT_XOR: u8 = 41;
-    pub const BIT_AND: u8 = 43;
-    pub const LSHIFT: u8 = 45;
-    pub const RSHIFT: u8 = 45;
-    pub const ADD: u8 = 47;
-    pub const SUB: u8 = 47;
-    pub const MULT: u8 = 49;
-    pub const DIV: u8 = 49;
-    pub const MOD: u8 = 49;
-    pub const FLOORDIV: u8 = 49;
-    pub const MAT_MULT: u8 = 49;
-    pub const INVERT: u8 = 53;
-    pub const UADD: u8 = 53;
-    pub const USUB: u8 = 53;
-    pub const POW: u8 = 55;
-    pub const AWAIT: u8 = 57;
-    pub const MAX: u8 = 63;
+    pub(crate) const ASSIGN: u8 = 3;
+    pub(crate) const ANN_ASSIGN: u8 = 5;
+    pub(crate) const AUG_ASSIGN: u8 = 5;
+    pub(crate) const EXPR: u8 = 5;
+    pub(crate) const YIELD: u8 = 7;
+    pub(crate) const YIELD_FROM: u8 = 7;
+    pub(crate) const IF: u8 = 9;
+    pub(crate) const FOR: u8 = 9;
+    pub(crate) const ASYNC_FOR: u8 = 9;
+    pub(crate) const WHILE: u8 = 9;
+    pub(crate) const RETURN: u8 = 11;
+    pub(crate) const SLICE: u8 = 13;
+    pub(crate) const SUBSCRIPT: u8 = 13;
+    pub(crate) const COMPREHENSION_TARGET: u8 = 19;
+    pub(crate) const TUPLE: u8 = 19;
+    pub(crate) const FORMATTED_VALUE: u8 = 19;
+    pub(crate) const COMMA: u8 = 21;
+    pub(crate) const NAMED_EXPR: u8 = 23;
+    pub(crate) const ASSERT: u8 = 23;
+    pub(crate) const LAMBDA: u8 = 27;
+    pub(crate) const IF_EXP: u8 = 27;
+    pub(crate) const COMPREHENSION: u8 = 29;
+    pub(crate) const OR: u8 = 31;
+    pub(crate) const AND: u8 = 33;
+    pub(crate) const NOT: u8 = 35;
+    pub(crate) const CMP: u8 = 37;
+    pub(crate) const BIT_OR: u8 = 39;
+    pub(crate) const BIT_XOR: u8 = 41;
+    pub(crate) const BIT_AND: u8 = 43;
+    pub(crate) const LSHIFT: u8 = 45;
+    pub(crate) const RSHIFT: u8 = 45;
+    pub(crate) const ADD: u8 = 47;
+    pub(crate) const SUB: u8 = 47;
+    pub(crate) const MULT: u8 = 49;
+    pub(crate) const DIV: u8 = 49;
+    pub(crate) const MOD: u8 = 49;
+    pub(crate) const FLOORDIV: u8 = 49;
+    pub(crate) const MAT_MULT: u8 = 49;
+    pub(crate) const INVERT: u8 = 53;
+    pub(crate) const UADD: u8 = 53;
+    pub(crate) const USUB: u8 = 53;
+    pub(crate) const POW: u8 = 55;
+    pub(crate) const AWAIT: u8 = 57;
+    pub(crate) const MAX: u8 = 63;
 }
 
 pub struct Generator<'a> {
@@ -101,8 +102,22 @@ impl<'a> Generator<'a> {
         }
     }
 
-    pub fn generate(self) -> String {
-        self.buffer
+    /// Generate source code from a [`Stmt`].
+    pub fn stmt(mut self, stmt: &Stmt) -> String {
+        self.unparse_stmt(stmt);
+        self.generate()
+    }
+
+    /// Generate source code from an [`Expr`].
+    pub fn expr(mut self, expr: &Expr) -> String {
+        self.unparse_expr(expr, 0);
+        self.generate()
+    }
+
+    /// Generate source code from a [`Constant`].
+    pub fn constant(mut self, constant: &Constant) -> String {
+        self.unparse_constant(constant);
+        self.generate()
     }
 
     fn newline(&mut self) {
@@ -117,12 +132,12 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn body<U>(&mut self, stmts: &[Stmt<U>]) {
-        self.indent_depth += 1;
+    fn body(&mut self, stmts: &[Stmt]) {
+        self.indent_depth = self.indent_depth.saturating_add(1);
         for stmt in stmts {
             self.unparse_stmt(stmt);
         }
-        self.indent_depth -= 1;
+        self.indent_depth = self.indent_depth.saturating_sub(1);
     }
 
     fn p(&mut self, s: &str) {
@@ -135,6 +150,26 @@ impl<'a> Generator<'a> {
         self.buffer += s;
     }
 
+    fn p_id(&mut self, s: &Identifier) {
+        self.p(s.as_str());
+    }
+
+    fn p_bytes_repr(&mut self, s: &[u8]) {
+        let escape = AsciiEscape::with_preferred_quote(s, self.quote.into());
+        if let Some(len) = escape.layout().len {
+            self.buffer.reserve(len);
+        }
+        escape.bytes_repr().write(&mut self.buffer).unwrap(); // write to string doesn't fail
+    }
+
+    fn p_str_repr(&mut self, s: &str) {
+        let escape = UnicodeEscape::with_preferred_quote(s, self.quote.into());
+        if let Some(len) = escape.layout().len {
+            self.buffer.reserve(len);
+        }
+        escape.str_repr().write(&mut self.buffer).unwrap(); // write to string doesn't fail
+    }
+
     fn p_if(&mut self, cond: bool, s: &str) {
         if cond {
             self.p(s);
@@ -145,13 +180,17 @@ impl<'a> Generator<'a> {
         self.p_if(!std::mem::take(first), s);
     }
 
-    pub fn unparse_suite<U>(&mut self, suite: &Suite<U>) {
+    pub(crate) fn generate(self) -> String {
+        self.buffer
+    }
+
+    pub fn unparse_suite(&mut self, suite: &Suite) {
         for stmt in suite {
             self.unparse_stmt(stmt);
         }
     }
 
-    pub fn unparse_stmt<U>(&mut self, ast: &Stmt<U>) {
+    pub(crate) fn unparse_stmt(&mut self, ast: &Stmt) {
         macro_rules! statement {
             ($body:block) => {{
                 self.newline();
@@ -161,26 +200,25 @@ impl<'a> Generator<'a> {
             }};
         }
 
-        match &ast.node {
-            StmtKind::FunctionDef {
+        match ast {
+            Stmt::FunctionDef(ast::StmtFunctionDef {
                 name,
                 args,
                 body,
                 returns,
                 decorator_list,
                 ..
-            } => {
+            }) => {
                 self.newlines(if self.indent_depth == 0 { 2 } else { 1 });
+                for decorator in decorator_list {
+                    statement!({
+                        self.p("@");
+                        self.unparse_expr(&decorator.expression, precedence::MAX);
+                    });
+                }
                 statement!({
-                    for decorator in decorator_list {
-                        statement!({
-                            self.p("@");
-                            self.unparse_expr(decorator, precedence::MAX);
-                        });
-                    }
-                    self.newline();
                     self.p("def ");
-                    self.p(name);
+                    self.p_id(name);
                     self.p("(");
                     self.unparse_args(args);
                     self.p(")");
@@ -195,24 +233,24 @@ impl<'a> Generator<'a> {
                     self.newlines(2);
                 }
             }
-            StmtKind::AsyncFunctionDef {
+            Stmt::AsyncFunctionDef(ast::StmtAsyncFunctionDef {
                 name,
                 args,
                 body,
                 returns,
                 decorator_list,
                 ..
-            } => {
+            }) => {
                 self.newlines(if self.indent_depth == 0 { 2 } else { 1 });
+                for decorator in decorator_list {
+                    statement!({
+                        self.p("@");
+                        self.unparse_expr(&decorator.expression, precedence::MAX);
+                    });
+                }
                 statement!({
-                    for decorator in decorator_list {
-                        statement!({
-                            self.unparse_expr(decorator, precedence::MAX);
-                        });
-                    }
-                    self.newline();
                     self.p("async def ");
-                    self.p(name);
+                    self.p_id(name);
                     self.p("(");
                     self.unparse_args(args);
                     self.p(")");
@@ -227,24 +265,24 @@ impl<'a> Generator<'a> {
                     self.newlines(2);
                 }
             }
-            StmtKind::ClassDef {
+            Stmt::ClassDef(ast::StmtClassDef {
                 name,
                 bases,
                 keywords,
                 body,
                 decorator_list,
-                ..
-            } => {
+                range: _range,
+            }) => {
                 self.newlines(if self.indent_depth == 0 { 2 } else { 1 });
+                for decorator in decorator_list {
+                    statement!({
+                        self.p("@");
+                        self.unparse_expr(&decorator.expression, precedence::MAX);
+                    });
+                }
                 statement!({
-                    for decorator in decorator_list {
-                        statement!({
-                            self.unparse_expr(decorator, precedence::MAX);
-                        });
-                    }
-                    self.newline();
                     self.p("class ");
-                    self.p(name);
+                    self.p_id(name);
                     let mut first = true;
                     for base in bases {
                         self.p_if(first, "(");
@@ -254,13 +292,13 @@ impl<'a> Generator<'a> {
                     for keyword in keywords {
                         self.p_if(first, "(");
                         self.p_delim(&mut first, ", ");
-                        if let Some(arg) = &keyword.node.arg {
-                            self.p(arg);
+                        if let Some(arg) = &keyword.arg {
+                            self.p_id(arg);
                             self.p("=");
                         } else {
                             self.p("**");
                         }
-                        self.unparse_expr(&keyword.node.value, precedence::MAX);
+                        self.unparse_expr(&keyword.value, precedence::MAX);
                     }
                     self.p_if(!first, ")");
                     self.p(":");
@@ -270,7 +308,10 @@ impl<'a> Generator<'a> {
                     self.newlines(2);
                 }
             }
-            StmtKind::Return { value } => {
+            Stmt::Return(ast::StmtReturn {
+                value,
+                range: _range,
+            }) => {
                 statement!({
                     if let Some(expr) = value {
                         self.p("return ");
@@ -280,7 +321,10 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::Delete { targets } => {
+            Stmt::Delete(ast::StmtDelete {
+                targets,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("del ");
                     let mut first = true;
@@ -290,7 +334,7 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::Assign { targets, value, .. } => {
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 statement!({
                     for target in targets {
                         self.unparse_expr(target, precedence::ASSIGN);
@@ -299,7 +343,12 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(value, precedence::ASSIGN);
                 });
             }
-            StmtKind::AugAssign { target, op, value } => {
+            Stmt::AugAssign(ast::StmtAugAssign {
+                target,
+                op,
+                value,
+                range: _range,
+            }) => {
                 statement!({
                     self.unparse_expr(target, precedence::AUG_ASSIGN);
                     self.p(" ");
@@ -322,14 +371,15 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(value, precedence::AUG_ASSIGN);
                 });
             }
-            StmtKind::AnnAssign {
+            Stmt::AnnAssign(ast::StmtAnnAssign {
                 target,
                 annotation,
                 value,
                 simple,
-            } => {
+                range: _range,
+            }) => {
                 statement!({
-                    let need_parens = matches!(target.node, ExprKind::Name { .. }) && simple == &0;
+                    let need_parens = matches!(target.as_ref(), Expr::Name(_)) && !simple;
                     self.p_if(need_parens, "(");
                     self.unparse_expr(target, precedence::ANN_ASSIGN);
                     self.p_if(need_parens, ")");
@@ -341,13 +391,13 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::For {
+            Stmt::For(ast::StmtFor {
                 target,
                 iter,
                 body,
                 orelse,
                 ..
-            } => {
+            }) => {
                 statement!({
                     self.p("for ");
                     self.unparse_expr(target, precedence::FOR);
@@ -363,13 +413,13 @@ impl<'a> Generator<'a> {
                     self.body(orelse);
                 }
             }
-            StmtKind::AsyncFor {
+            Stmt::AsyncFor(ast::StmtAsyncFor {
                 target,
                 iter,
                 body,
                 orelse,
                 ..
-            } => {
+            }) => {
                 statement!({
                     self.p("async for ");
                     self.unparse_expr(target, precedence::ASYNC_FOR);
@@ -385,7 +435,12 @@ impl<'a> Generator<'a> {
                     self.body(orelse);
                 }
             }
-            StmtKind::While { test, body, orelse } => {
+            Stmt::While(ast::StmtWhile {
+                test,
+                body,
+                orelse,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("while ");
                     self.unparse_expr(test, precedence::WHILE);
@@ -399,7 +454,12 @@ impl<'a> Generator<'a> {
                     self.body(orelse);
                 }
             }
-            StmtKind::If { test, body, orelse } => {
+            Stmt::If(ast::StmtIf {
+                test,
+                body,
+                orelse,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("if ");
                     self.unparse_expr(test, precedence::IF);
@@ -407,10 +467,16 @@ impl<'a> Generator<'a> {
                 });
                 self.body(body);
 
-                let mut orelse_: &Vec<Stmt<U>> = orelse;
+                let mut orelse_: &[Stmt] = orelse;
                 loop {
-                    if orelse_.len() == 1 && matches!(orelse_[0].node, StmtKind::If { .. }) {
-                        if let StmtKind::If { body, test, orelse } = &orelse_[0].node {
+                    if orelse_.len() == 1 && matches!(orelse_[0], Stmt::If(_)) {
+                        if let Stmt::If(ast::StmtIf {
+                            body,
+                            test,
+                            orelse,
+                            range: _range,
+                        }) = &orelse_[0]
+                        {
                             statement!({
                                 self.p("elif ");
                                 self.unparse_expr(test, precedence::IF);
@@ -430,45 +496,53 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            StmtKind::With { items, body, .. } => {
+            Stmt::With(ast::StmtWith { items, body, .. }) => {
                 statement!({
                     self.p("with ");
                     let mut first = true;
                     for item in items {
                         self.p_delim(&mut first, ", ");
-                        self.unparse_withitem(item);
+                        self.unparse_with_item(item);
                     }
                     self.p(":");
                 });
                 self.body(body);
             }
-            StmtKind::AsyncWith { items, body, .. } => {
+            Stmt::AsyncWith(ast::StmtAsyncWith { items, body, .. }) => {
                 statement!({
                     self.p("async with ");
                     let mut first = true;
                     for item in items {
                         self.p_delim(&mut first, ", ");
-                        self.unparse_withitem(item);
+                        self.unparse_with_item(item);
                     }
                     self.p(":");
                 });
                 self.body(body);
             }
-            StmtKind::Match { subject, cases } => {
+            Stmt::Match(ast::StmtMatch {
+                subject,
+                cases,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("match ");
                     self.unparse_expr(subject, precedence::MAX);
                     self.p(":");
                 });
                 for case in cases {
-                    self.indent_depth += 1;
+                    self.indent_depth = self.indent_depth.saturating_add(1);
                     statement!({
                         self.unparse_match_case(case);
                     });
-                    self.indent_depth -= 1;
+                    self.indent_depth = self.indent_depth.saturating_sub(1);
                 }
             }
-            StmtKind::Raise { exc, cause } => {
+            Stmt::Raise(ast::StmtRaise {
+                exc,
+                cause,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("raise");
                     if let Some(exc) = exc {
@@ -481,12 +555,13 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::Try {
+            Stmt::Try(ast::StmtTry {
                 body,
                 handlers,
                 orelse,
                 finalbody,
-            } => {
+                range: _range,
+            }) => {
                 statement!({
                     self.p("try:");
                 });
@@ -494,7 +569,7 @@ impl<'a> Generator<'a> {
 
                 for handler in handlers {
                     statement!({
-                        self.unparse_excepthandler(handler, false);
+                        self.unparse_except_handler(handler, false);
                     });
                 }
 
@@ -511,12 +586,13 @@ impl<'a> Generator<'a> {
                     self.body(finalbody);
                 }
             }
-            StmtKind::TryStar {
+            Stmt::TryStar(ast::StmtTryStar {
                 body,
                 handlers,
                 orelse,
                 finalbody,
-            } => {
+                range: _range,
+            }) => {
                 statement!({
                     self.p("try:");
                 });
@@ -524,7 +600,7 @@ impl<'a> Generator<'a> {
 
                 for handler in handlers {
                     statement!({
-                        self.unparse_excepthandler(handler, true);
+                        self.unparse_except_handler(handler, true);
                     });
                 }
 
@@ -541,7 +617,11 @@ impl<'a> Generator<'a> {
                     self.body(finalbody);
                 }
             }
-            StmtKind::Assert { test, msg } => {
+            Stmt::Assert(ast::StmtAssert {
+                test,
+                msg,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("assert ");
                     self.unparse_expr(test, precedence::ASSERT);
@@ -551,7 +631,10 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::Import { names } => {
+            Stmt::Import(ast::StmtImport {
+                names,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("import ");
                     let mut first = true;
@@ -561,18 +644,19 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::ImportFrom {
+            Stmt::ImportFrom(ast::StmtImportFrom {
                 module,
                 names,
                 level,
-            } => {
+                range: _range,
+            }) => {
                 statement!({
                     self.p("from ");
                     if let Some(level) = level {
-                        self.p(&".".repeat(*level));
+                        self.p(&".".repeat(level.to_usize()));
                     }
                     if let Some(module) = module {
-                        self.p(module);
+                        self.p_id(module);
                     }
                     self.p(" import ");
                     let mut first = true;
@@ -582,42 +666,51 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            StmtKind::Global { names } => {
+            Stmt::Global(ast::StmtGlobal {
+                names,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("global ");
                     let mut first = true;
                     for name in names {
                         self.p_delim(&mut first, ", ");
-                        self.p(name);
+                        self.p_id(name);
                     }
                 });
             }
-            StmtKind::Nonlocal { names } => {
+            Stmt::Nonlocal(ast::StmtNonlocal {
+                names,
+                range: _range,
+            }) => {
                 statement!({
                     self.p("nonlocal ");
                     let mut first = true;
                     for name in names {
                         self.p_delim(&mut first, ", ");
-                        self.p(name);
+                        self.p_id(name);
                     }
                 });
             }
-            StmtKind::Expr { value } => {
+            Stmt::Expr(ast::StmtExpr {
+                value,
+                range: _range,
+            }) => {
                 statement!({
                     self.unparse_expr(value, precedence::EXPR);
                 });
             }
-            StmtKind::Pass => {
+            Stmt::Pass(_) => {
                 statement!({
                     self.p("pass");
                 });
             }
-            StmtKind::Break => {
+            Stmt::Break(_) => {
                 statement!({
                     self.p("break");
                 });
             }
-            StmtKind::Continue => {
+            Stmt::Continue(_) => {
                 statement!({
                     self.p("continue");
                 });
@@ -625,9 +718,14 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_excepthandler<U>(&mut self, ast: &Excepthandler<U>, star: bool) {
-        match &ast.node {
-            ExcepthandlerKind::ExceptHandler { type_, name, body } => {
+    fn unparse_except_handler(&mut self, ast: &ExceptHandler, star: bool) {
+        match ast {
+            ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
+                type_,
+                name,
+                body,
+                range: _range,
+            }) => {
                 self.p("except");
                 if star {
                     self.p("*");
@@ -638,7 +736,7 @@ impl<'a> Generator<'a> {
                 }
                 if let Some(name) = name {
                     self.p(" as ");
-                    self.p(name);
+                    self.p_id(name);
                 }
                 self.p(":");
                 self.body(body);
@@ -646,15 +744,24 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_pattern<U>(&mut self, ast: &Pattern<U>) {
-        match &ast.node {
-            PatternKind::MatchValue { value } => {
+    fn unparse_pattern(&mut self, ast: &Pattern) {
+        match ast {
+            Pattern::MatchValue(ast::PatternMatchValue {
+                value,
+                range: _range,
+            }) => {
                 self.unparse_expr(value, precedence::MAX);
             }
-            PatternKind::MatchSingleton { value } => {
+            Pattern::MatchSingleton(ast::PatternMatchSingleton {
+                value,
+                range: _range,
+            }) => {
                 self.unparse_constant(value);
             }
-            PatternKind::MatchSequence { patterns } => {
+            Pattern::MatchSequence(ast::PatternMatchSequence {
+                patterns,
+                range: _range,
+            }) => {
                 self.p("[");
                 let mut first = true;
                 for pattern in patterns {
@@ -663,11 +770,12 @@ impl<'a> Generator<'a> {
                 }
                 self.p("]");
             }
-            PatternKind::MatchMapping {
+            Pattern::MatchMapping(ast::PatternMatchMapping {
                 keys,
                 patterns,
                 rest,
-            } => {
+                range: _range,
+            }) => {
                 self.p("{");
                 let mut first = true;
                 for (key, pattern) in keys.iter().zip(patterns) {
@@ -679,31 +787,41 @@ impl<'a> Generator<'a> {
                 if let Some(rest) = rest {
                     self.p_delim(&mut first, ", ");
                     self.p("**");
-                    self.p(rest);
+                    self.p_id(rest);
                 }
                 self.p("}");
             }
-            PatternKind::MatchClass { .. } => {}
-            PatternKind::MatchStar { name } => {
+            Pattern::MatchClass(_) => {}
+            Pattern::MatchStar(ast::PatternMatchStar {
+                name,
+                range: _range,
+            }) => {
                 self.p("*");
                 if let Some(name) = name {
-                    self.p(name);
+                    self.p_id(name);
                 } else {
                     self.p("_");
                 }
             }
-            PatternKind::MatchAs { pattern, name } => {
+            Pattern::MatchAs(ast::PatternMatchAs {
+                pattern,
+                name,
+                range: _range,
+            }) => {
                 if let Some(pattern) = pattern {
                     self.unparse_pattern(pattern);
                     self.p(" as ");
                 }
                 if let Some(name) = name {
-                    self.p(name);
+                    self.p_id(name);
                 } else {
                     self.p("_");
                 }
             }
-            PatternKind::MatchOr { patterns } => {
+            Pattern::MatchOr(ast::PatternMatchOr {
+                patterns,
+                range: _range,
+            }) => {
                 let mut first = true;
                 for pattern in patterns {
                     self.p_delim(&mut first, " | ");
@@ -713,7 +831,7 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_match_case<U>(&mut self, ast: &MatchCase<U>) {
+    fn unparse_match_case(&mut self, ast: &MatchCase) {
         self.p("case ");
         self.unparse_pattern(&ast.pattern);
         if let Some(guard) = &ast.guard {
@@ -724,7 +842,7 @@ impl<'a> Generator<'a> {
         self.body(&ast.body);
     }
 
-    pub fn unparse_expr<U>(&mut self, ast: &Expr<U>, level: u8) {
+    pub(crate) fn unparse_expr(&mut self, ast: &Expr, level: u8) {
         macro_rules! opprec {
             ($opty:ident, $x:expr, $enu:path, $($var:ident($op:literal, $prec:ident)),*$(,)?) => {
                 match $x {
@@ -747,9 +865,13 @@ impl<'a> Generator<'a> {
                 ret
             }};
         }
-        match &ast.node {
-            ExprKind::BoolOp { op, values } => {
-                let (op, prec) = opprec!(bin, op, Boolop, And("and", AND), Or("or", OR));
+        match ast {
+            Expr::BoolOp(ast::ExprBoolOp {
+                op,
+                values,
+                range: _range,
+            }) => {
+                let (op, prec) = opprec!(bin, op, BoolOp, And("and", AND), Or("or", OR));
                 group_if!(prec, {
                     let mut first = true;
                     for val in values {
@@ -758,14 +880,23 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            ExprKind::NamedExpr { target, value } => {
+            Expr::NamedExpr(ast::ExprNamedExpr {
+                target,
+                value,
+                range: _range,
+            }) => {
                 group_if!(precedence::NAMED_EXPR, {
                     self.unparse_expr(target, precedence::NAMED_EXPR);
                     self.p(" := ");
                     self.unparse_expr(value, precedence::NAMED_EXPR + 1);
                 });
             }
-            ExprKind::BinOp { left, op, right } => {
+            Expr::BinOp(ast::ExprBinOp {
+                left,
+                op,
+                right,
+                range: _range,
+            }) => {
                 let rassoc = matches!(op, Operator::Pow);
                 let (op, prec) = opprec!(
                     bin,
@@ -791,11 +922,15 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(right, prec + u8::from(!rassoc));
                 });
             }
-            ExprKind::UnaryOp { op, operand } => {
+            Expr::UnaryOp(ast::ExprUnaryOp {
+                op,
+                operand,
+                range: _range,
+            }) => {
                 let (op, prec) = opprec!(
                     un,
                     op,
-                    rustpython_parser::ast::Unaryop,
+                    rustpython_parser::ast::UnaryOp,
                     Invert("~", INVERT),
                     Not("not ", NOT),
                     UAdd("+", UADD),
@@ -806,7 +941,11 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(operand, prec);
                 });
             }
-            ExprKind::Lambda { args, body } => {
+            Expr::Lambda(ast::ExprLambda {
+                args,
+                body,
+                range: _range,
+            }) => {
                 group_if!(precedence::LAMBDA, {
                     let npos = args.args.len() + args.posonlyargs.len();
                     self.p(if npos > 0 { "lambda " } else { "lambda" });
@@ -815,7 +954,12 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(body, precedence::LAMBDA);
                 });
             }
-            ExprKind::IfExp { test, body, orelse } => {
+            Expr::IfExp(ast::ExprIfExp {
+                test,
+                body,
+                orelse,
+                range: _range,
+            }) => {
                 group_if!(precedence::IF_EXP, {
                     self.unparse_expr(body, precedence::IF_EXP + 1);
                     self.p(" if ");
@@ -824,7 +968,11 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(orelse, precedence::IF_EXP);
                 });
             }
-            ExprKind::Dict { keys, values } => {
+            Expr::Dict(ast::ExprDict {
+                keys,
+                values,
+                range: _range,
+            }) => {
                 self.p("{");
                 let mut first = true;
                 for (k, v) in keys.iter().zip(values) {
@@ -840,7 +988,10 @@ impl<'a> Generator<'a> {
                 }
                 self.p("}");
             }
-            ExprKind::Set { elts } => {
+            Expr::Set(ast::ExprSet {
+                elts,
+                range: _range,
+            }) => {
                 if elts.is_empty() {
                     self.p("set()");
                 } else {
@@ -853,23 +1004,32 @@ impl<'a> Generator<'a> {
                     self.p("}");
                 }
             }
-            ExprKind::ListComp { elt, generators } => {
+            Expr::ListComp(ast::ExprListComp {
+                elt,
+                generators,
+                range: _range,
+            }) => {
                 self.p("[");
                 self.unparse_expr(elt, precedence::MAX);
                 self.unparse_comp(generators);
                 self.p("]");
             }
-            ExprKind::SetComp { elt, generators } => {
+            Expr::SetComp(ast::ExprSetComp {
+                elt,
+                generators,
+                range: _range,
+            }) => {
                 self.p("{");
                 self.unparse_expr(elt, precedence::MAX);
                 self.unparse_comp(generators);
                 self.p("}");
             }
-            ExprKind::DictComp {
+            Expr::DictComp(ast::ExprDictComp {
                 key,
                 value,
                 generators,
-            } => {
+                range: _range,
+            }) => {
                 self.p("{");
                 self.unparse_expr(key, precedence::MAX);
                 self.p(": ");
@@ -877,19 +1037,29 @@ impl<'a> Generator<'a> {
                 self.unparse_comp(generators);
                 self.p("}");
             }
-            ExprKind::GeneratorExp { elt, generators } => {
+            Expr::GeneratorExp(ast::ExprGeneratorExp {
+                elt,
+                generators,
+                range: _range,
+            }) => {
                 self.p("(");
                 self.unparse_expr(elt, precedence::COMMA);
                 self.unparse_comp(generators);
                 self.p(")");
             }
-            ExprKind::Await { value } => {
+            Expr::Await(ast::ExprAwait {
+                value,
+                range: _range,
+            }) => {
                 group_if!(precedence::AWAIT, {
                     self.p("await ");
                     self.unparse_expr(value, precedence::MAX);
                 });
             }
-            ExprKind::Yield { value } => {
+            Expr::Yield(ast::ExprYield {
+                value,
+                range: _range,
+            }) => {
                 group_if!(precedence::YIELD, {
                     self.p("yield");
                     if let Some(value) = value {
@@ -898,50 +1068,56 @@ impl<'a> Generator<'a> {
                     }
                 });
             }
-            ExprKind::YieldFrom { value } => {
+            Expr::YieldFrom(ast::ExprYieldFrom {
+                value,
+                range: _range,
+            }) => {
                 group_if!(precedence::YIELD_FROM, {
                     self.p("yield from ");
                     self.unparse_expr(value, precedence::MAX);
                 });
             }
-            ExprKind::Compare {
+            Expr::Compare(ast::ExprCompare {
                 left,
                 ops,
                 comparators,
-            } => {
+                range: _range,
+            }) => {
                 group_if!(precedence::CMP, {
                     let new_lvl = precedence::CMP + 1;
                     self.unparse_expr(left, new_lvl);
                     for (op, cmp) in ops.iter().zip(comparators) {
                         let op = match op {
-                            Cmpop::Eq => " == ",
-                            Cmpop::NotEq => " != ",
-                            Cmpop::Lt => " < ",
-                            Cmpop::LtE => " <= ",
-                            Cmpop::Gt => " > ",
-                            Cmpop::GtE => " >= ",
-                            Cmpop::Is => " is ",
-                            Cmpop::IsNot => " is not ",
-                            Cmpop::In => " in ",
-                            Cmpop::NotIn => " not in ",
+                            CmpOp::Eq => " == ",
+                            CmpOp::NotEq => " != ",
+                            CmpOp::Lt => " < ",
+                            CmpOp::LtE => " <= ",
+                            CmpOp::Gt => " > ",
+                            CmpOp::GtE => " >= ",
+                            CmpOp::Is => " is ",
+                            CmpOp::IsNot => " is not ",
+                            CmpOp::In => " in ",
+                            CmpOp::NotIn => " not in ",
                         };
                         self.p(op);
                         self.unparse_expr(cmp, new_lvl);
                     }
                 });
             }
-            ExprKind::Call {
+            Expr::Call(ast::ExprCall {
                 func,
                 args,
                 keywords,
-            } => {
+                range: _range,
+            }) => {
                 self.unparse_expr(func, precedence::MAX);
                 self.p("(");
                 if let (
-                    [Expr {
-                        node: ExprKind::GeneratorExp { elt, generators },
-                        ..
-                    }],
+                    [Expr::GeneratorExp(ast::ExprGeneratorExp {
+                        elt,
+                        generators,
+                        range: _range,
+                    })],
                     [],
                 ) = (&**args, &**keywords)
                 {
@@ -956,35 +1132,45 @@ impl<'a> Generator<'a> {
                     }
                     for kw in keywords {
                         self.p_delim(&mut first, ", ");
-                        if let Some(arg) = &kw.node.arg {
-                            self.p(arg);
+                        if let Some(arg) = &kw.arg {
+                            self.p_id(arg);
                             self.p("=");
-                            self.unparse_expr(&kw.node.value, precedence::COMMA);
+                            self.unparse_expr(&kw.value, precedence::COMMA);
                         } else {
                             self.p("**");
-                            self.unparse_expr(&kw.node.value, precedence::MAX);
+                            self.unparse_expr(&kw.value, precedence::MAX);
                         }
                     }
                 }
                 self.p(")");
             }
-            ExprKind::FormattedValue {
+            Expr::FormattedValue(ast::ExprFormattedValue {
                 value,
                 conversion,
                 format_spec,
-            } => self.unparse_formatted(value, *conversion, format_spec.as_deref()),
-            ExprKind::JoinedStr { values } => self.unparse_joinedstr(values, false),
-            ExprKind::Constant { value, kind } => {
+                range: _range,
+            }) => self.unparse_formatted(value, *conversion, format_spec.as_deref()),
+            Expr::JoinedStr(ast::ExprJoinedStr {
+                values,
+                range: _range,
+            }) => {
+                self.unparse_joinedstr(values, false);
+            }
+            Expr::Constant(ast::ExprConstant {
+                value,
+                kind,
+                range: _range,
+            }) => {
                 if let Some(kind) = kind {
                     self.p(kind);
                 }
                 self.unparse_constant(value);
             }
-            ExprKind::Attribute { value, attr, .. } => {
-                if let ExprKind::Constant {
+            Expr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
+                if let Expr::Constant(ast::ExprConstant {
                     value: Constant::Int(_),
                     ..
-                } = &value.node
+                }) = value.as_ref()
                 {
                     self.p("(");
                     self.unparse_expr(value, precedence::MAX);
@@ -993,20 +1179,20 @@ impl<'a> Generator<'a> {
                     self.unparse_expr(value, precedence::MAX);
                     self.p(".");
                 };
-                self.p(attr);
+                self.p_id(attr);
             }
-            ExprKind::Subscript { value, slice, .. } => {
+            Expr::Subscript(ast::ExprSubscript { value, slice, .. }) => {
                 self.unparse_expr(value, precedence::MAX);
                 self.p("[");
                 self.unparse_expr(slice, precedence::SUBSCRIPT);
                 self.p("]");
             }
-            ExprKind::Starred { value, .. } => {
+            Expr::Starred(ast::ExprStarred { value, .. }) => {
                 self.p("*");
                 self.unparse_expr(value, precedence::MAX);
             }
-            ExprKind::Name { id, .. } => self.p(id),
-            ExprKind::List { elts, .. } => {
+            Expr::Name(ast::ExprName { id, .. }) => self.p(id.as_str()),
+            Expr::List(ast::ExprList { elts, .. }) => {
                 self.p("[");
                 let mut first = true;
                 for elt in elts {
@@ -1015,7 +1201,7 @@ impl<'a> Generator<'a> {
                 }
                 self.p("]");
             }
-            ExprKind::Tuple { elts, .. } => {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                 if elts.is_empty() {
                     self.p("()");
                 } else {
@@ -1029,7 +1215,12 @@ impl<'a> Generator<'a> {
                     });
                 }
             }
-            ExprKind::Slice { lower, upper, step } => {
+            Expr::Slice(ast::ExprSlice {
+                lower,
+                upper,
+                step,
+                range: _range,
+            }) => {
                 if let Some(lower) = lower {
                     self.unparse_expr(lower, precedence::SLICE);
                 }
@@ -1045,15 +1236,15 @@ impl<'a> Generator<'a> {
         }
     }
 
-    pub fn unparse_constant(&mut self, constant: &Constant) {
+    pub(crate) fn unparse_constant(&mut self, constant: &Constant) {
         assert_eq!(f64::MAX_10_EXP, 308);
         let inf_str = "1e309";
         match constant {
             Constant::Bytes(b) => {
-                self.p(&bytes::repr(b, self.quote.into()));
+                self.p_bytes_repr(b);
             }
             Constant::Str(s) => {
-                self.p(&format!("{}", str::repr(s, self.quote.into())));
+                self.p_str_repr(s);
             }
             Constant::None => self.p("None"),
             Constant::Bool(b) => self.p(if *b { "True" } else { "False" }),
@@ -1079,7 +1270,7 @@ impl<'a> Generator<'a> {
                 if fp.is_infinite() {
                     self.p(inf_str);
                 } else {
-                    self.p(&rustpython_common::float_ops::to_string(*fp));
+                    self.p(&rustpython_literal::float::to_string(*fp));
                 }
             }
             Constant::Complex { real, imag } => {
@@ -1098,16 +1289,11 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_args<U>(&mut self, args: &Arguments<U>) {
+    fn unparse_args(&mut self, args: &Arguments) {
         let mut first = true;
-        let defaults_start = args.posonlyargs.len() + args.args.len() - args.defaults.len();
-        for (i, arg) in args.posonlyargs.iter().chain(&args.args).enumerate() {
+        for (i, arg_with_default) in args.posonlyargs.iter().chain(&args.args).enumerate() {
             self.p_delim(&mut first, ", ");
-            self.unparse_arg(arg);
-            if let Some(i) = i.checked_sub(defaults_start) {
-                self.p("=");
-                self.unparse_expr(&args.defaults[i], precedence::COMMA);
-            }
+            self.unparse_arg_with_default(arg_with_default);
             self.p_if(i + 1 == args.posonlyargs.len(), ", /");
         }
         if args.vararg.is_some() || !args.kwonlyargs.is_empty() {
@@ -1117,17 +1303,9 @@ impl<'a> Generator<'a> {
         if let Some(vararg) = &args.vararg {
             self.unparse_arg(vararg);
         }
-        let defaults_start = args.kwonlyargs.len() - args.kw_defaults.len();
-        for (i, kwarg) in args.kwonlyargs.iter().enumerate() {
+        for kwarg in &args.kwonlyargs {
             self.p_delim(&mut first, ", ");
-            self.unparse_arg(kwarg);
-            if let Some(default) = i
-                .checked_sub(defaults_start)
-                .and_then(|i| args.kw_defaults.get(i))
-            {
-                self.p("=");
-                self.unparse_expr(default, precedence::COMMA);
-            }
+            self.unparse_arg_with_default(kwarg);
         }
         if let Some(kwarg) = &args.kwarg {
             self.p_delim(&mut first, ", ");
@@ -1136,17 +1314,25 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_arg<U>(&mut self, arg: &Arg<U>) {
-        self.p(&arg.node.arg);
-        if let Some(ann) = &arg.node.annotation {
+    fn unparse_arg(&mut self, arg: &Arg) {
+        self.p_id(&arg.arg);
+        if let Some(ann) = &arg.annotation {
             self.p(": ");
             self.unparse_expr(ann, precedence::COMMA);
         }
     }
 
-    fn unparse_comp<U>(&mut self, generators: &[Comprehension<U>]) {
+    fn unparse_arg_with_default(&mut self, arg_with_default: &ArgWithDefault) {
+        self.unparse_arg(&arg_with_default.def);
+        if let Some(default) = &arg_with_default.default {
+            self.p("=");
+            self.unparse_expr(default, precedence::COMMA);
+        }
+    }
+
+    fn unparse_comp(&mut self, generators: &[Comprehension]) {
         for comp in generators {
-            self.p(if comp.is_async > 0 {
+            self.p(if comp.is_async {
                 " async for "
             } else {
                 " for "
@@ -1161,13 +1347,13 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn unparse_fstring_body<U>(&mut self, values: &[Expr<U>], is_spec: bool) {
+    fn unparse_fstring_body(&mut self, values: &[Expr], is_spec: bool) {
         for value in values {
             self.unparse_fstring_elem(value, is_spec);
         }
     }
 
-    fn unparse_formatted<U>(&mut self, val: &Expr<U>, conversion: usize, spec: Option<&Expr<U>>) {
+    fn unparse_formatted(&mut self, val: &Expr, conversion: ConversionFlag, spec: Option<&Expr>) {
         let mut generator = Generator::new(self.indent, self.quote, self.line_ending);
         generator.unparse_expr(val, precedence::FORMATTED_VALUE);
         let brace = if generator.buffer.starts_with('{') {
@@ -1179,7 +1365,7 @@ impl<'a> Generator<'a> {
         self.p(brace);
         self.buffer += &generator.buffer;
 
-        if conversion != ConversionFlag::None as usize {
+        if !conversion.is_none() {
             self.p("!");
             #[allow(clippy::cast_possible_truncation)]
             self.p(&format!("{}", conversion as u8 as char));
@@ -1193,21 +1379,27 @@ impl<'a> Generator<'a> {
         self.p("}");
     }
 
-    fn unparse_fstring_elem<U>(&mut self, expr: &Expr<U>, is_spec: bool) {
-        match &expr.node {
-            ExprKind::Constant { value, .. } => {
+    fn unparse_fstring_elem(&mut self, expr: &Expr, is_spec: bool) {
+        match expr {
+            Expr::Constant(ast::ExprConstant { value, .. }) => {
                 if let Constant::Str(s) = value {
                     self.unparse_fstring_str(s);
                 } else {
                     unreachable!()
                 }
             }
-            ExprKind::JoinedStr { values } => self.unparse_joinedstr(values, is_spec),
-            ExprKind::FormattedValue {
+            Expr::JoinedStr(ast::ExprJoinedStr {
+                values,
+                range: _range,
+            }) => {
+                self.unparse_joinedstr(values, is_spec);
+            }
+            Expr::FormattedValue(ast::ExprFormattedValue {
                 value,
                 conversion,
                 format_spec,
-            } => self.unparse_formatted(value, *conversion, format_spec.as_deref()),
+                range: _range,
+            }) => self.unparse_formatted(value, *conversion, format_spec.as_deref()),
             _ => unreachable!(),
         }
     }
@@ -1217,7 +1409,7 @@ impl<'a> Generator<'a> {
         self.p(&s);
     }
 
-    fn unparse_joinedstr<U>(&mut self, values: &[Expr<U>], is_spec: bool) {
+    fn unparse_joinedstr(&mut self, values: &[Expr], is_spec: bool) {
         if is_spec {
             self.unparse_fstring_body(values, is_spec);
         } else {
@@ -1232,21 +1424,21 @@ impl<'a> Generator<'a> {
             );
             generator.unparse_fstring_body(values, is_spec);
             let body = &generator.buffer;
-            self.p(&format!("{}", str::repr(body, self.quote.into())));
+            self.p_str_repr(body);
         }
     }
 
-    fn unparse_alias<U>(&mut self, alias: &Alias<U>) {
-        self.p(&alias.node.name);
-        if let Some(asname) = &alias.node.asname {
+    fn unparse_alias(&mut self, alias: &Alias) {
+        self.p_id(&alias.name);
+        if let Some(asname) = &alias.asname {
             self.p(" as ");
-            self.p(asname);
+            self.p_id(asname);
         }
     }
 
-    fn unparse_withitem<U>(&mut self, withitem: &Withitem<U>) {
-        self.unparse_expr(&withitem.context_expr, precedence::MAX);
-        if let Some(optional_vars) = &withitem.optional_vars {
+    fn unparse_with_item(&mut self, with_item: &WithItem) {
+        self.unparse_expr(&with_item.context_expr, precedence::MAX);
+        if let Some(optional_vars) = &with_item.optional_vars {
             self.p(" as ");
             self.unparse_expr(optional_vars, precedence::MAX);
         }
@@ -1255,19 +1447,21 @@ impl<'a> Generator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use rustpython_parser as parser;
+    use rustpython_ast::Stmt;
+    use rustpython_parser::Parse;
 
-    use crate::source_code::stylist::{Indentation, LineEnding, Quote};
+    use ruff_python_whitespace::LineEnding;
+
+    use crate::source_code::stylist::{Indentation, Quote};
     use crate::source_code::Generator;
 
     fn round_trip(contents: &str) -> String {
         let indentation = Indentation::default();
         let quote = Quote::default();
         let line_ending = LineEnding::default();
-        let program = parser::parse_program(contents, "<filename>").unwrap();
-        let stmt = program.first().unwrap();
+        let stmt = Stmt::parse(contents, "<filename>").unwrap();
         let mut generator = Generator::new(&indentation, quote, line_ending);
-        generator.unparse_stmt(stmt);
+        generator.unparse_stmt(&stmt);
         generator.generate()
     }
 
@@ -1277,10 +1471,9 @@ mod tests {
         line_ending: LineEnding,
         contents: &str,
     ) -> String {
-        let program = parser::parse_program(contents, "<filename>").unwrap();
-        let stmt = program.first().unwrap();
+        let stmt = Stmt::parse(contents, "<filename>").unwrap();
         let mut generator = Generator::new(indentation, quote, line_ending);
-        generator.unparse_stmt(stmt);
+        generator.unparse_stmt(&stmt);
         generator.generate()
     }
 
@@ -1409,6 +1602,29 @@ except* Exception as e:
         );
         assert_eq!(round_trip(r#"x = (1, 2, 3)"#), r#"x = 1, 2, 3"#);
         assert_eq!(round_trip(r#"-(1) + ~(2) + +(3)"#), r#"-1 + ~2 + +3"#);
+        assert_round_trip!(
+            r#"def f():
+
+    def f():
+        pass"#
+        );
+        assert_round_trip!(
+            r#"@foo
+def f():
+
+    @foo
+    def f():
+        pass"#
+        );
+
+        assert_round_trip!(
+            r#"@foo
+class Foo:
+
+    @foo
+    def f():
+        pass"#
+        );
     }
 
     #[test]

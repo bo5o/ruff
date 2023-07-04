@@ -1,14 +1,47 @@
-use rustpython_parser::ast::{Stmt, StmtKind};
+use rustpython_parser::ast::{self, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for `break`, `continue`, and `return` statements in `finally`
+/// blocks.
+///
+/// ## Why is this bad?
+/// The use of `break`, `continue`, and `return` statements in `finally` blocks
+/// can cause exceptions to be silenced.
+///
+/// `finally` blocks execute regardless of whether an exception is raised. If a
+/// `break`, `continue`, or `return` statement is reached in a `finally` block,
+/// any exception raised in the `try` or `except` blocks will be silenced.
+///
+/// ## Example
+/// ```python
+/// def speed(distance, time):
+///     try:
+///         return distance / time
+///     except ZeroDivisionError:
+///         raise ValueError("Time cannot be zero")
+///     finally:
+///         return 299792458  # `ValueError` is silenced
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def speed(distance, time):
+///     try:
+///         return distance / time
+///     except ZeroDivisionError:
+///         raise ValueError("Time cannot be zero")
+/// ```
+///
+/// ## References
+/// - [Python documentation: The `try` statement](https://docs.python.org/3/reference/compound_stmts.html#the-try-statement)
 #[violation]
 pub struct JumpStatementInFinally {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for JumpStatementInFinally {
@@ -24,34 +57,31 @@ fn walk_stmt(checker: &mut Checker, body: &[Stmt], f: fn(&Stmt) -> bool) {
         if f(stmt) {
             checker.diagnostics.push(Diagnostic::new(
                 JumpStatementInFinally {
-                    name: match &stmt.node {
-                        StmtKind::Break { .. } => "break".to_string(),
-                        StmtKind::Continue { .. } => "continue".to_string(),
-                        StmtKind::Return { .. } => "return".to_string(),
-                        _ => unreachable!(
-                            "Expected StmtKind::Break | StmtKind::Continue | StmtKind::Return"
-                        ),
-                    },
+                    name: match stmt {
+                        Stmt::Break(_) => "break",
+                        Stmt::Continue(_) => "continue",
+                        Stmt::Return(_) => "return",
+                        _ => unreachable!("Expected Stmt::Break | Stmt::Continue | Stmt::Return"),
+                    }
+                    .to_owned(),
                 },
-                Range::from(stmt),
+                stmt.range(),
             ));
         }
-        match &stmt.node {
-            StmtKind::While { body, .. }
-            | StmtKind::For { body, .. }
-            | StmtKind::AsyncFor { body, .. } => {
-                walk_stmt(checker, body, |stmt| {
-                    matches!(stmt.node, StmtKind::Return { .. })
-                });
+        match stmt {
+            Stmt::While(ast::StmtWhile { body, .. })
+            | Stmt::For(ast::StmtFor { body, .. })
+            | Stmt::AsyncFor(ast::StmtAsyncFor { body, .. }) => {
+                walk_stmt(checker, body, Stmt::is_return_stmt);
             }
-            StmtKind::If { body, .. }
-            | StmtKind::Try { body, .. }
-            | StmtKind::TryStar { body, .. }
-            | StmtKind::With { body, .. }
-            | StmtKind::AsyncWith { body, .. } => {
+            Stmt::If(ast::StmtIf { body, .. })
+            | Stmt::Try(ast::StmtTry { body, .. })
+            | Stmt::TryStar(ast::StmtTryStar { body, .. })
+            | Stmt::With(ast::StmtWith { body, .. })
+            | Stmt::AsyncWith(ast::StmtAsyncWith { body, .. }) => {
                 walk_stmt(checker, body, f);
             }
-            StmtKind::Match { cases, .. } => {
+            Stmt::Match(ast::StmtMatch { cases, .. }) => {
                 for case in cases {
                     walk_stmt(checker, &case.body, f);
                 }
@@ -62,11 +92,8 @@ fn walk_stmt(checker: &mut Checker, body: &[Stmt], f: fn(&Stmt) -> bool) {
 }
 
 /// B012
-pub fn jump_statement_in_finally(checker: &mut Checker, finalbody: &[Stmt]) {
+pub(crate) fn jump_statement_in_finally(checker: &mut Checker, finalbody: &[Stmt]) {
     walk_stmt(checker, finalbody, |stmt| {
-        matches!(
-            stmt.node,
-            StmtKind::Break | StmtKind::Continue | StmtKind::Return { .. }
-        )
+        matches!(stmt, Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_))
     });
 }

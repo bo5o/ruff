@@ -1,11 +1,10 @@
-use log::error;
-use rustpython_parser::ast::{Stmt, StmtKind};
+use rustpython_parser::ast;
+use rustpython_parser::ast::Ranged;
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::{Range, RefEquality};
 
-use crate::autofix::actions::delete_stmt;
+use crate::autofix;
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
@@ -21,7 +20,7 @@ use crate::registry::AsRule;
 /// from typing import TYPE_CHECKING
 ///
 /// if TYPE_CHECKING:
-///    pass
+///     pass
 ///
 /// print("Hello, world!")
 /// ```
@@ -48,42 +47,23 @@ impl AlwaysAutofixableViolation for EmptyTypeCheckingBlock {
 }
 
 /// TCH005
-pub fn empty_type_checking_block<'a, 'b>(
-    checker: &mut Checker<'a>,
-    stmt: &'a Stmt,
-    body: &'a [Stmt],
-) where
-    'b: 'a,
-{
-    if body.len() == 1 && matches!(body[0].node, StmtKind::Pass) {
-        let mut diagnostic = Diagnostic::new(EmptyTypeCheckingBlock, Range::from(&body[0]));
-
-        // Delete the entire type-checking block.
-        if checker.patch(diagnostic.kind.rule()) {
-            let parent = checker
-                .ctx
-                .child_to_parent
-                .get(&RefEquality(stmt))
-                .map(Into::into);
-            let deleted: Vec<&Stmt> = checker.deletions.iter().map(Into::into).collect();
-            match delete_stmt(
-                stmt,
-                parent,
-                &deleted,
-                checker.locator,
-                checker.indexer,
-                checker.stylist,
-            ) {
-                Ok(fix) => {
-                    if fix.is_deletion() || fix.content() == Some("pass") {
-                        checker.deletions.insert(RefEquality(stmt));
-                    }
-                    diagnostic.set_fix(fix);
-                }
-                Err(e) => error!("Failed to remove empty type-checking block: {e}"),
-            }
-        }
-
-        checker.diagnostics.push(diagnostic);
+pub(crate) fn empty_type_checking_block(checker: &mut Checker, stmt: &ast::StmtIf) {
+    if stmt.body.len() != 1 {
+        return;
     }
+
+    let stmt = &stmt.body[0];
+    if !stmt.is_pass_stmt() {
+        return;
+    }
+
+    let mut diagnostic = Diagnostic::new(EmptyTypeCheckingBlock, stmt.range());
+    if checker.patch(diagnostic.kind.rule()) {
+        // Delete the entire type-checking block.
+        let stmt = checker.semantic().stmt();
+        let parent = checker.semantic().stmt_parent();
+        let edit = autofix::edits::delete_stmt(stmt, parent, checker.locator, checker.indexer);
+        diagnostic.set_fix(Fix::automatic(edit).isolate(checker.isolation(parent)));
+    }
+    checker.diagnostics.push(diagnostic);
 }

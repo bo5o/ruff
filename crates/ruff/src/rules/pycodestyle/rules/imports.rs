@@ -1,8 +1,8 @@
-use rustpython_parser::ast::{Alias, Stmt};
+use rustpython_parser::ast::{Alias, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::source_code::Locator;
 
 use crate::checkers::ast::Checker;
 
@@ -10,7 +10,7 @@ use crate::checkers::ast::Checker;
 /// Check for multiple imports on one line.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, "imports should usually be on separate lines."
+/// According to [PEP 8], "imports should usually be on separate lines."
 ///
 /// ## Example
 /// ```python
@@ -23,8 +23,7 @@ use crate::checkers::ast::Checker;
 /// import sys
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#imports)
+/// [PEP 8]: https://peps.python.org/pep-0008/#imports
 #[violation]
 pub struct MultipleImportsOnOneLine;
 
@@ -39,12 +38,12 @@ impl Violation for MultipleImportsOnOneLine {
 /// Checks for imports that are not at the top of the file.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, "imports are always put at the top of the file, just after any
+/// According to [PEP 8], "imports are always put at the top of the file, just after any
 /// module comments and docstrings, and before module globals and constants."
 ///
 /// ## Example
 /// ```python
-/// 'One string'
+/// "One string"
 /// "Two string"
 /// a = 1
 /// import os
@@ -55,13 +54,13 @@ impl Violation for MultipleImportsOnOneLine {
 /// ```python
 /// import os
 /// from sys import x
-/// 'One string'
+///
+/// "One string"
 /// "Two string"
 /// a = 1
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#imports)
+/// [PEP 8]: https://peps.python.org/pep-0008/#imports
 #[violation]
 pub struct ModuleImportNotAtTopOfFile;
 
@@ -73,20 +72,23 @@ impl Violation for ModuleImportNotAtTopOfFile {
 }
 
 /// E401
-pub fn multiple_imports_on_one_line(checker: &mut Checker, stmt: &Stmt, names: &[Alias]) {
+pub(crate) fn multiple_imports_on_one_line(checker: &mut Checker, stmt: &Stmt, names: &[Alias]) {
     if names.len() > 1 {
         checker
             .diagnostics
-            .push(Diagnostic::new(MultipleImportsOnOneLine, Range::from(stmt)));
+            .push(Diagnostic::new(MultipleImportsOnOneLine, stmt.range()));
     }
 }
 
 /// E402
-pub fn module_import_not_at_top_of_file(checker: &mut Checker, stmt: &Stmt) {
-    if checker.ctx.seen_import_boundary && stmt.location.column() == 0 {
-        checker.diagnostics.push(Diagnostic::new(
-            ModuleImportNotAtTopOfFile,
-            Range::from(stmt),
-        ));
+pub(crate) fn module_import_not_at_top_of_file(
+    checker: &mut Checker,
+    stmt: &Stmt,
+    locator: &Locator,
+) {
+    if checker.semantic().seen_import_boundary() && locator.is_at_start_of_line(stmt.start()) {
+        checker
+            .diagnostics
+            .push(Diagnostic::new(ModuleImportNotAtTopOfFile, stmt.range()));
     }
 }

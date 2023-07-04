@@ -1,8 +1,6 @@
-use rustpython_parser::ast::Location;
-
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_whitespace::Line;
 
 const BIDI_UNICODE: [char; 10] = [
     '\u{202A}', //{LEFT-TO-RIGHT EMBEDDING}
@@ -24,6 +22,25 @@ const BIDI_UNICODE: [char; 10] = [
                 // to hide code
 ];
 
+/// ## What it does
+/// Checks for bidirectional unicode characters.
+///
+/// ## Why is this bad?
+/// The interaction between bidirectional unicode characters and the
+/// surrounding code can be surprising to those that are unfamiliar
+/// with right-to-left writing systems.
+///
+/// In some cases, bidirectional unicode characters can also be used to
+/// obfuscate code and introduce or mask security vulnerabilities.
+///
+/// ## Example
+/// ```python
+/// s = "א" * 100  #  "א" is assigned
+/// print(s)  # prints a 100-character string
+/// ```
+///
+/// ## References
+/// - [PEP 672](https://peps.python.org/pep-0672/#bidirectional-text)
 #[violation]
 pub struct BidirectionalUnicode;
 
@@ -35,16 +52,10 @@ impl Violation for BidirectionalUnicode {
 }
 
 /// PLE2502
-pub fn bidirectional_unicode(lineno: usize, line: &str) -> Vec<Diagnostic> {
+pub(crate) fn bidirectional_unicode(line: &Line) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     if line.contains(BIDI_UNICODE) {
-        diagnostics.push(Diagnostic::new(
-            BidirectionalUnicode,
-            Range::new(
-                Location::new(lineno + 1, 0),
-                Location::new((lineno + 1) + 1, 0),
-            ),
-        ));
+        diagnostics.push(Diagnostic::new(BidirectionalUnicode, line.full_range()));
     }
     diagnostics
 }

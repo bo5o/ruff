@@ -1,16 +1,15 @@
 pub mod document;
 pub mod tag;
 
-use crate::format_element::tag::{LabelId, Tag};
 use std::borrow::Cow;
-
-#[cfg(target_pointer_width = "64")]
-use crate::static_assert;
-use crate::{TagKind, TextSize};
-use ruff_text_size::TextRange;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
+
+use crate::format_element::tag::{GroupMode, LabelId, Tag};
+use crate::source_code::SourceCodeSlice;
+use crate::TagKind;
+use ruff_text_size::TextSize;
 
 /// Language agnostic IR for formatting source code.
 ///
@@ -26,20 +25,27 @@ pub enum FormatElement {
     /// Forces the parent group to print in expanded mode.
     ExpandParent,
 
+    /// Indicates the position of the elements coming after this element in the source document.
+    /// The printer will create a source map entry from this position in the source document to the
+    /// formatted position.
+    SourcePosition(TextSize),
+
     /// Token constructed by the formatter from a static string
     StaticText { text: &'static str },
 
     /// Token constructed from the input source as a dynamic
-    /// string with its start position in the input document.
+    /// string.
     DynamicText {
         /// There's no need for the text to be mutable, using `Box<str>` safes 8 bytes over `String`.
         text: Box<str>,
-        /// The start position of the dynamic token in the unformatted source code
-        source_position: TextSize,
     },
 
-    /// Token constructed by slicing a defined range from a static string.
-    StaticTextSlice { text: Rc<str>, range: TextRange },
+    /// Text that gets emitted as it is in the source code. Optimized to avoid any allocations.
+    SourceCodeSlice {
+        slice: SourceCodeSlice,
+        /// Whether the string contains any new line characters
+        contains_newlines: bool,
+    },
 
     /// Prevents that line suffixes move past this boundary. Forces the printer to print any pending
     /// line suffixes, potentially by inserting a hard line break.
@@ -51,7 +57,10 @@ pub enum FormatElement {
 
     /// A list of different variants representing the same content. The printer picks the best fitting content.
     /// Line breaks inside of a best fitting don't propagate to parent groups.
-    BestFitting(BestFitting),
+    BestFitting {
+        variants: BestFittingVariants,
+        mode: BestFittingMode,
+    },
 
     /// A [Tag] that marks the start/end of some content to which some special formatting is applied.
     Tag(Tag),
@@ -69,17 +78,27 @@ impl std::fmt::Debug for FormatElement {
             FormatElement::DynamicText { text, .. } => {
                 fmt.debug_tuple("DynamicText").field(text).finish()
             }
-            FormatElement::StaticTextSlice { text, .. } => {
-                fmt.debug_tuple("Text").field(text).finish()
-            }
+            FormatElement::SourceCodeSlice {
+                slice,
+                contains_newlines,
+            } => fmt
+                .debug_tuple("Text")
+                .field(slice)
+                .field(contains_newlines)
+                .finish(),
             FormatElement::LineSuffixBoundary => write!(fmt, "LineSuffixBoundary"),
-            FormatElement::BestFitting(best_fitting) => {
-                fmt.debug_tuple("BestFitting").field(&best_fitting).finish()
-            }
+            FormatElement::BestFitting { variants, mode } => fmt
+                .debug_struct("BestFitting")
+                .field("variants", variants)
+                .field("mode", &mode)
+                .finish(),
             FormatElement::Interned(interned) => {
                 fmt.debug_list().entries(interned.deref()).finish()
             }
             FormatElement::Tag(tag) => fmt.debug_tuple("Tag").field(tag).finish(),
+            FormatElement::SourcePosition(position) => {
+                fmt.debug_tuple("SourcePosition").field(position).finish()
+            }
         }
     }
 }
@@ -117,6 +136,15 @@ impl PrintMode {
 
     pub const fn is_expanded(&self) -> bool {
         matches!(self, PrintMode::Expanded)
+    }
+}
+
+impl From<GroupMode> for PrintMode {
+    fn from(value: GroupMode) -> Self {
+        match value {
+            GroupMode::Flat => PrintMode::Flat,
+            GroupMode::Expand | GroupMode::Propagated => PrintMode::Expanded,
+        }
     }
 }
 
@@ -217,7 +245,7 @@ impl FormatElement {
     pub const fn is_text(&self) -> bool {
         matches!(
             self,
-            FormatElement::StaticTextSlice { .. }
+            FormatElement::SourceCodeSlice { .. }
                 | FormatElement::DynamicText { .. }
                 | FormatElement::StaticText { .. }
         )
@@ -236,14 +264,20 @@ impl FormatElements for FormatElement {
             FormatElement::Line(line_mode) => matches!(line_mode, LineMode::Hard | LineMode::Empty),
             FormatElement::StaticText { text } => text.contains('\n'),
             FormatElement::DynamicText { text, .. } => text.contains('\n'),
-            FormatElement::StaticTextSlice { text, range } => text[*range].contains('\n'),
+            FormatElement::SourceCodeSlice {
+                contains_newlines, ..
+            } => *contains_newlines,
             FormatElement::Interned(interned) => interned.will_break(),
             // Traverse into the most flat version because the content is guaranteed to expand when even
             // the most flat version contains some content that forces a break.
-            FormatElement::BestFitting(best_fitting) => best_fitting.most_flat().will_break(),
-            FormatElement::LineSuffixBoundary | FormatElement::Space | FormatElement::Tag(_) => {
-                false
-            }
+            FormatElement::BestFitting {
+                variants: best_fitting,
+                ..
+            } => best_fitting.most_flat().will_break(),
+            FormatElement::LineSuffixBoundary
+            | FormatElement::Space
+            | FormatElement::Tag(_)
+            | FormatElement::SourcePosition(_) => false,
         }
     }
 
@@ -267,19 +301,36 @@ impl FormatElements for FormatElement {
     }
 }
 
-/// Provides the printer with different representations for the same element so that the printer
-/// can pick the best fitting variant.
-///
-/// Best fitting is defined as the variant that takes the most horizontal space but fits on the line.
-#[derive(Clone, Eq, PartialEq)]
-pub struct BestFitting {
-    /// The different variants for this element.
-    /// The first element is the one that takes up the most space horizontally (the most flat),
-    /// The last element takes up the least space horizontally (but most horizontal space).
-    variants: Box<[Box<[FormatElement]>]>,
+/// Mode used to determine if any variant (except the most expanded) fits for [`BestFittingVariants`].
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum BestFittingMode {
+    /// The variant fits if the content up to the first hard or a soft line break inside a [`Group`] with
+    /// [`PrintMode::Expanded`] fits on the line. The default mode.
+    ///
+    /// [`Group`]: tag::Group
+    #[default]
+    FirstLine,
+
+    /// A variant fits if all lines fit into the configured print width. A line ends if by any
+    /// hard or a soft line break inside a [`Group`] with [`PrintMode::Expanded`].
+    /// The content doesn't fit if there's any hard line break  outside a [`Group`] with [`PrintMode::Expanded`]
+    /// (a hard line break in content that should be considered in [`PrintMode::Flat`].
+    ///
+    /// Use this mode with caution as it requires measuring all content of the variant which is more
+    /// expensive than using [`BestFittingMode::FirstLine`].
+    ///
+    /// [`Group`]: tag::Group
+    AllLines,
 }
 
-impl BestFitting {
+/// The different variants for this element.
+/// The first element is the one that takes up the most space horizontally (the most flat),
+/// The last element takes up the least space horizontally (but most horizontal space).
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct BestFittingVariants(Box<[Box<[FormatElement]>]>);
+
+impl BestFittingVariants {
     /// Creates a new best fitting IR with the given variants. The method itself isn't unsafe
     /// but it is to discourage people from using it because the printer will panic if
     /// the slice doesn't contain at least the least and most expanded variants.
@@ -295,33 +346,42 @@ impl BestFitting {
             "Requires at least the least expanded and most expanded variants"
         );
 
-        Self {
-            variants: variants.into_boxed_slice(),
-        }
+        Self(variants.into_boxed_slice())
     }
 
     /// Returns the most expanded variant
     pub fn most_expanded(&self) -> &[FormatElement] {
-        self.variants.last().expect(
+        self.0.last().expect(
             "Most contain at least two elements, as guaranteed by the best fitting builder.",
         )
     }
 
-    pub fn variants(&self) -> &[Box<[FormatElement]>] {
-        &self.variants
+    pub fn as_slice(&self) -> &[Box<[FormatElement]>] {
+        &self.0
     }
 
     /// Returns the least expanded variant
     pub fn most_flat(&self) -> &[FormatElement] {
-        self.variants.first().expect(
+        self.0.first().expect(
             "Most contain at least two elements, as guaranteed by the best fitting builder.",
         )
     }
 }
 
-impl std::fmt::Debug for BestFitting {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(&*self.variants).finish()
+impl Deref for BestFittingVariants {
+    type Target = [Box<[FormatElement]>];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a BestFittingVariants {
+    type Item = &'a Box<[FormatElement]>;
+    type IntoIter = std::slice::Iter<'a, Box<[FormatElement]>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
     }
 }
 
@@ -369,20 +429,25 @@ mod tests {
 }
 
 #[cfg(target_pointer_width = "64")]
-static_assert!(std::mem::size_of::<ruff_text_size::TextRange>() == 8usize);
+mod sizes {
+    // Increasing the size of FormatElement has serious consequences on runtime performance and memory footprint.
+    // Is there a more efficient way to encode the data to avoid increasing its size? Can the information
+    // be recomputed at a later point in time?
+    // You reduced the size of a format element? Excellent work!
 
-#[cfg(target_pointer_width = "64")]
-static_assert!(std::mem::size_of::<crate::format_element::tag::VerbatimKind>() == 8usize);
+    use static_assertions::assert_eq_size;
 
-#[cfg(not(debug_assertions))]
-#[cfg(target_pointer_width = "64")]
-static_assert!(std::mem::size_of::<crate::format_element::Tag>() == 16usize);
+    assert_eq_size!(ruff_text_size::TextRange, [u8; 8]);
+    assert_eq_size!(crate::prelude::tag::VerbatimKind, [u8; 8]);
+    assert_eq_size!(crate::prelude::Interned, [u8; 16]);
+    assert_eq_size!(crate::format_element::BestFittingVariants, [u8; 16]);
 
-// Increasing the size of FormatElement has serious consequences on runtime performance and memory footprint.
-// Is there a more efficient way to encode the data to avoid increasing its size? Can the information
-// be recomputed at a later point in time?
-// You reduced the size of a format element? Excellent work!
+    #[cfg(not(debug_assertions))]
+    assert_eq_size!(crate::SourceCodeSlice, [u8; 8]);
 
-#[cfg(not(debug_assertions))]
-#[cfg(target_pointer_width = "64")]
-static_assert!(std::mem::size_of::<crate::FormatElement>() == 32usize);
+    #[cfg(not(debug_assertions))]
+    assert_eq_size!(crate::format_element::Tag, [u8; 16]);
+
+    #[cfg(not(debug_assertions))]
+    assert_eq_size!(crate::FormatElement, [u8; 24]);
+}

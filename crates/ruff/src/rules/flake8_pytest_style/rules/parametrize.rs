@@ -1,11 +1,10 @@
-use rustpython_parser::ast::{Constant, Expr, ExprContext, ExprKind};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, Constant, Decorator, Expr, ExprContext, Ranged};
 use rustpython_parser::{lexer, Mode, Tok};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Violation};
-use ruff_diagnostics::{Diagnostic, Edit};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::{create_expr, unparse_expr};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::source_code::{Generator, Locator};
 
 use crate::checkers::ast::Checker;
 use crate::registry::{AsRule, Rule};
@@ -18,16 +17,18 @@ pub struct PytestParametrizeNamesWrongType {
     pub expected: types::ParametrizeNameType,
 }
 
-impl AlwaysAutofixableViolation for PytestParametrizeNamesWrongType {
+impl Violation for PytestParametrizeNamesWrongType {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         let PytestParametrizeNamesWrongType { expected } = self;
         format!("Wrong name(s) type in `@pytest.mark.parametrize`, expected `{expected}`")
     }
 
-    fn autofix_title(&self) -> String {
+    fn autofix_title(&self) -> Option<String> {
         let PytestParametrizeNamesWrongType { expected } = self;
-        format!("Use a `{expected}` for parameter names")
+        Some(format!("Use a `{expected}` for parameter names"))
     }
 }
 
@@ -45,14 +46,14 @@ impl Violation for PytestParametrizeValuesWrongType {
     }
 }
 
-fn elts_to_csv(elts: &[Expr], checker: &Checker) -> Option<String> {
+fn elts_to_csv(elts: &[Expr], generator: Generator) -> Option<String> {
     let all_literals = elts.iter().all(|e| {
         matches!(
-            e.node,
-            ExprKind::Constant {
+            e,
+            Expr::Constant(ast::ExprConstant {
                 value: Constant::Str(_),
                 ..
-            }
+            })
         )
     });
 
@@ -60,25 +61,24 @@ fn elts_to_csv(elts: &[Expr], checker: &Checker) -> Option<String> {
         return None;
     }
 
-    Some(unparse_expr(
-        &create_expr(ExprKind::Constant {
-            value: Constant::Str(elts.iter().fold(String::new(), |mut acc, elt| {
-                if let ExprKind::Constant {
-                    value: Constant::Str(ref s),
-                    ..
-                } = elt.node
-                {
-                    if !acc.is_empty() {
-                        acc.push(',');
-                    }
-                    acc.push_str(s);
+    let node = Expr::Constant(ast::ExprConstant {
+        value: Constant::Str(elts.iter().fold(String::new(), |mut acc, elt| {
+            if let Expr::Constant(ast::ExprConstant {
+                value: Constant::Str(ref s),
+                ..
+            }) = elt
+            {
+                if !acc.is_empty() {
+                    acc.push(',');
                 }
-                acc
-            })),
-            kind: None,
-        }),
-        checker.stylist,
-    ))
+                acc.push_str(s);
+            }
+            acc
+        })),
+        kind: None,
+        range: TextRange::default(),
+    });
+    Some(generator.expr(&node))
 }
 
 /// Returns the range of the `name` argument of `@pytest.mark.parametrize`.
@@ -94,24 +94,24 @@ fn elts_to_csv(elts: &[Expr], checker: &Checker) -> Option<String> {
 /// ```
 ///
 /// This method assumes that the first argument is a string.
-fn get_parametrize_name_range(checker: &Checker, decorator: &Expr, expr: &Expr) -> Range {
+fn get_parametrize_name_range(decorator: &Decorator, expr: &Expr, locator: &Locator) -> TextRange {
     let mut locations = Vec::new();
     let mut implicit_concat = None;
 
     // The parenthesis are not part of the AST, so we need to tokenize the
     // decorator to find them.
-    for (start, tok, end) in lexer::lex_located(
-        checker.locator.slice(decorator),
+    for (tok, range) in lexer::lex_starts_at(
+        locator.slice(decorator.range()),
         Mode::Module,
-        decorator.location,
+        decorator.start(),
     )
     .flatten()
     {
         match tok {
-            Tok::Lpar => locations.push(start),
+            Tok::Lpar => locations.push(range.start()),
             Tok::Rpar => {
                 if let Some(start) = locations.pop() {
-                    implicit_concat = Some(Range::new(start, end));
+                    implicit_concat = Some(TextRange::new(start, range.end()));
                 }
             }
             // Stop after the first argument.
@@ -123,24 +123,25 @@ fn get_parametrize_name_range(checker: &Checker, decorator: &Expr, expr: &Expr) 
     if let Some(range) = implicit_concat {
         range
     } else {
-        Range::from(expr)
+        expr.range()
     }
 }
 
 /// PT006
-fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
+fn check_names(checker: &mut Checker, decorator: &Decorator, expr: &Expr) {
     let names_type = checker.settings.flake8_pytest_style.parametrize_names_type;
 
-    match &expr.node {
-        ExprKind::Constant {
+    match expr {
+        Expr::Constant(ast::ExprConstant {
             value: Constant::Str(string),
             ..
-        } => {
+        }) => {
             let names = split_names(string);
             if names.len() > 1 {
                 match names_type {
                     types::ParametrizeNameType::Tuple => {
-                        let name_range = get_parametrize_name_range(checker, decorator, expr);
+                        let name_range =
+                            get_parametrize_name_range(decorator, expr, checker.locator);
                         let mut diagnostic = Diagnostic::new(
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
@@ -148,33 +149,30 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             name_range,
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            diagnostic.set_fix(Edit::replacement(
-                                format!(
-                                    "({})",
-                                    unparse_expr(
-                                        &create_expr(ExprKind::Tuple {
-                                            elts: names
-                                                .iter()
-                                                .map(|&name| {
-                                                    create_expr(ExprKind::Constant {
-                                                        value: Constant::Str(name.to_string()),
-                                                        kind: None,
-                                                    })
-                                                })
-                                                .collect(),
-                                            ctx: ExprContext::Load,
-                                        }),
-                                        checker.stylist,
-                                    )
-                                ),
-                                name_range.location,
-                                name_range.end_location,
-                            ));
+                            let node = Expr::Tuple(ast::ExprTuple {
+                                elts: names
+                                    .iter()
+                                    .map(|name| {
+                                        Expr::Constant(ast::ExprConstant {
+                                            value: Constant::Str((*name).to_string()),
+                                            kind: None,
+                                            range: TextRange::default(),
+                                        })
+                                    })
+                                    .collect(),
+                                ctx: ExprContext::Load,
+                                range: TextRange::default(),
+                            });
+                            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                                format!("({})", checker.generator().expr(&node)),
+                                name_range,
+                            )));
                         }
                         checker.diagnostics.push(diagnostic);
                     }
                     types::ParametrizeNameType::List => {
-                        let name_range = get_parametrize_name_range(checker, decorator, expr);
+                        let name_range =
+                            get_parametrize_name_range(decorator, expr, checker.locator);
                         let mut diagnostic = Diagnostic::new(
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
@@ -182,25 +180,24 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             name_range,
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            diagnostic.set_fix(Edit::replacement(
-                                unparse_expr(
-                                    &create_expr(ExprKind::List {
-                                        elts: names
-                                            .iter()
-                                            .map(|&name| {
-                                                create_expr(ExprKind::Constant {
-                                                    value: Constant::Str(name.to_string()),
-                                                    kind: None,
-                                                })
-                                            })
-                                            .collect(),
-                                        ctx: ExprContext::Load,
-                                    }),
-                                    checker.stylist,
-                                ),
-                                name_range.location,
-                                name_range.end_location,
-                            ));
+                            let node = Expr::List(ast::ExprList {
+                                elts: names
+                                    .iter()
+                                    .map(|name| {
+                                        Expr::Constant(ast::ExprConstant {
+                                            value: Constant::Str((*name).to_string()),
+                                            kind: None,
+                                            range: TextRange::default(),
+                                        })
+                                    })
+                                    .collect(),
+                                ctx: ExprContext::Load,
+                                range: TextRange::default(),
+                            });
+                            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                                checker.generator().expr(&node),
+                                name_range,
+                            )));
                         }
                         checker.diagnostics.push(diagnostic);
                     }
@@ -208,7 +205,7 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                 }
             }
         }
-        ExprKind::Tuple { elts, .. } => {
+        Expr::Tuple(ast::ExprTuple { elts, .. }) => {
             if elts.len() == 1 {
                 if let Some(first) = elts.first() {
                     handle_single_name(checker, expr, first);
@@ -221,20 +218,18 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
                             },
-                            Range::from(expr),
+                            expr.range(),
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            diagnostic.set_fix(Edit::replacement(
-                                unparse_expr(
-                                    &create_expr(ExprKind::List {
-                                        elts: elts.clone(),
-                                        ctx: ExprContext::Load,
-                                    }),
-                                    checker.stylist,
-                                ),
-                                expr.location,
-                                expr.end_location.unwrap(),
-                            ));
+                            let node = Expr::List(ast::ExprList {
+                                elts: elts.clone(),
+                                ctx: ExprContext::Load,
+                                range: TextRange::default(),
+                            });
+                            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                                checker.generator().expr(&node),
+                                expr.range(),
+                            )));
                         }
                         checker.diagnostics.push(diagnostic);
                     }
@@ -243,15 +238,14 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
                             },
-                            Range::from(expr),
+                            expr.range(),
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            if let Some(content) = elts_to_csv(elts, checker) {
-                                diagnostic.set_fix(Edit::replacement(
+                            if let Some(content) = elts_to_csv(elts, checker.generator()) {
+                                diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                                     content,
-                                    expr.location,
-                                    expr.end_location.unwrap(),
-                                ));
+                                    expr.range(),
+                                )));
                             }
                         }
                         checker.diagnostics.push(diagnostic);
@@ -259,7 +253,7 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                 }
             };
         }
-        ExprKind::List { elts, .. } => {
+        Expr::List(ast::ExprList { elts, .. }) => {
             if elts.len() == 1 {
                 if let Some(first) = elts.first() {
                     handle_single_name(checker, expr, first);
@@ -272,23 +266,18 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
                             },
-                            Range::from(expr),
+                            expr.range(),
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            diagnostic.set_fix(Edit::replacement(
-                                format!(
-                                    "({})",
-                                    unparse_expr(
-                                        &create_expr(ExprKind::Tuple {
-                                            elts: elts.clone(),
-                                            ctx: ExprContext::Load,
-                                        }),
-                                        checker.stylist,
-                                    )
-                                ),
-                                expr.location,
-                                expr.end_location.unwrap(),
-                            ));
+                            let node = Expr::Tuple(ast::ExprTuple {
+                                elts: elts.clone(),
+                                ctx: ExprContext::Load,
+                                range: TextRange::default(),
+                            });
+                            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                                format!("({})", checker.generator().expr(&node)),
+                                expr.range(),
+                            )));
                         }
                         checker.diagnostics.push(diagnostic);
                     }
@@ -297,15 +286,14 @@ fn check_names(checker: &mut Checker, decorator: &Expr, expr: &Expr) {
                             PytestParametrizeNamesWrongType {
                                 expected: names_type,
                             },
-                            Range::from(expr),
+                            expr.range(),
                         );
                         if checker.patch(diagnostic.kind.rule()) {
-                            if let Some(content) = elts_to_csv(elts, checker) {
-                                diagnostic.set_fix(Edit::replacement(
+                            if let Some(content) = elts_to_csv(elts, checker.generator()) {
+                                diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                                     content,
-                                    expr.location,
-                                    expr.end_location.unwrap(),
-                                ));
+                                    expr.range(),
+                                )));
                             }
                         }
                         checker.diagnostics.push(diagnostic);
@@ -326,39 +314,39 @@ fn check_values(checker: &mut Checker, names: &Expr, values: &Expr) {
         .flake8_pytest_style
         .parametrize_values_row_type;
 
-    let is_multi_named = if let ExprKind::Constant {
+    let is_multi_named = if let Expr::Constant(ast::ExprConstant {
         value: Constant::Str(string),
         ..
-    } = &names.node
+    }) = &names
     {
         split_names(string).len() > 1
     } else {
         true
     };
 
-    match &values.node {
-        ExprKind::List { elts, .. } => {
+    match values {
+        Expr::List(ast::ExprList { elts, .. }) => {
             if values_type != types::ParametrizeValuesType::List {
                 checker.diagnostics.push(Diagnostic::new(
                     PytestParametrizeValuesWrongType {
                         values: values_type,
                         row: values_row_type,
                     },
-                    Range::from(values),
+                    values.range(),
                 ));
             }
             if is_multi_named {
                 handle_value_rows(checker, elts, values_type, values_row_type);
             }
         }
-        ExprKind::Tuple { elts, .. } => {
+        Expr::Tuple(ast::ExprTuple { elts, .. }) => {
             if values_type != types::ParametrizeValuesType::Tuple {
                 checker.diagnostics.push(Diagnostic::new(
                     PytestParametrizeValuesWrongType {
                         values: values_type,
                         row: values_row_type,
                     },
-                    Range::from(values),
+                    values.range(),
                 ));
             }
             if is_multi_named {
@@ -374,15 +362,15 @@ fn handle_single_name(checker: &mut Checker, expr: &Expr, value: &Expr) {
         PytestParametrizeNamesWrongType {
             expected: types::ParametrizeNameType::Csv,
         },
-        Range::from(expr),
+        expr.range(),
     );
 
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            unparse_expr(&create_expr(value.node.clone()), checker.stylist),
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+        let node = value.clone();
+        diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+            checker.generator().expr(&node),
+            expr.range(),
+        )));
     }
     checker.diagnostics.push(diagnostic);
 }
@@ -394,26 +382,26 @@ fn handle_value_rows(
     values_row_type: types::ParametrizeValuesRowType,
 ) {
     for elt in elts {
-        match &elt.node {
-            ExprKind::Tuple { .. } => {
+        match elt {
+            Expr::Tuple(_) => {
                 if values_row_type != types::ParametrizeValuesRowType::Tuple {
                     checker.diagnostics.push(Diagnostic::new(
                         PytestParametrizeValuesWrongType {
                             values: values_type,
                             row: values_row_type,
                         },
-                        Range::from(elt),
+                        elt.range(),
                     ));
                 }
             }
-            ExprKind::List { .. } => {
+            Expr::List(_) => {
                 if values_row_type != types::ParametrizeValuesRowType::List {
                     checker.diagnostics.push(Diagnostic::new(
                         PytestParametrizeValuesWrongType {
                             values: values_type,
                             row: values_row_type,
                         },
-                        Range::from(elt),
+                        elt.range(),
                     ));
                 }
             }
@@ -422,24 +410,16 @@ fn handle_value_rows(
     }
 }
 
-pub fn parametrize(checker: &mut Checker, decorators: &[Expr]) {
+pub(crate) fn parametrize(checker: &mut Checker, decorators: &[Decorator]) {
     for decorator in decorators {
-        if is_pytest_parametrize(decorator, checker) {
-            if let ExprKind::Call { args, .. } = &decorator.node {
-                if checker
-                    .settings
-                    .rules
-                    .enabled(Rule::PytestParametrizeNamesWrongType)
-                {
+        if is_pytest_parametrize(decorator, checker.semantic()) {
+            if let Expr::Call(ast::ExprCall { args, .. }) = &decorator.expression {
+                if checker.enabled(Rule::PytestParametrizeNamesWrongType) {
                     if let Some(names) = args.get(0) {
                         check_names(checker, decorator, names);
                     }
                 }
-                if checker
-                    .settings
-                    .rules
-                    .enabled(Rule::PytestParametrizeValuesWrongType)
-                {
+                if checker.enabled(Rule::PytestParametrizeValuesWrongType) {
                     if let Some(names) = args.get(0) {
                         if let Some(values) = args.get(1) {
                             check_values(checker, names, values);

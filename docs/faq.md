@@ -8,6 +8,12 @@ the `line-length` setting is consistent between the two.
 As a project, Ruff is designed to be used alongside Black and, as such, will defer implementing
 stylistic lint rules that are obviated by autoformatting.
 
+Note that Ruff and Black treat line-length enforcement a little differently. Black makes a
+best-effort attempt to adhere to the `line-length`, but avoids automatic line-wrapping in some cases
+(e.g., within comments). Ruff, on the other hand, will flag rule `E501` for any line that exceeds
+the `line-length` setting. As such, if `E501` is enabled, Ruff can still trigger line-length
+violations even when Black is enabled.
+
 ## How does Ruff compare to Flake8?
 
 (Coming from Flake8? Try [`flake8-to-ruff`](https://pypi.org/project/flake8-to-ruff/) to
@@ -27,13 +33,15 @@ natively, including:
 - [eradicate](https://pypi.org/project/eradicate/)
 - [flake8-2020](https://pypi.org/project/flake8-2020/)
 - [flake8-annotations](https://pypi.org/project/flake8-annotations/)
-- [flake8-bandit](https://pypi.org/project/flake8-bandit/) ([#1646](https://github.com/charliermarsh/ruff/issues/1646))
+- [flake8-async](https://pypi.org/project/flake8-async)
+- [flake8-bandit](https://pypi.org/project/flake8-bandit/) ([#1646](https://github.com/astral-sh/ruff/issues/1646))
 - [flake8-blind-except](https://pypi.org/project/flake8-blind-except/)
 - [flake8-boolean-trap](https://pypi.org/project/flake8-boolean-trap/)
 - [flake8-bugbear](https://pypi.org/project/flake8-bugbear/)
 - [flake8-builtins](https://pypi.org/project/flake8-builtins/)
 - [flake8-commas](https://pypi.org/project/flake8-commas/)
 - [flake8-comprehensions](https://pypi.org/project/flake8-comprehensions/)
+- [flake8-copyright](https://pypi.org/project/flake8-copyright/)
 - [flake8-datetimez](https://pypi.org/project/flake8-datetimez/)
 - [flake8-debugger](https://pypi.org/project/flake8-debugger/)
 - [flake8-django](https://pypi.org/project/flake8-django/)
@@ -55,16 +63,20 @@ natively, including:
 - [flake8-return](https://pypi.org/project/flake8-return/)
 - [flake8-self](https://pypi.org/project/flake8-self/)
 - [flake8-simplify](https://pypi.org/project/flake8-simplify/)
+- [flake8-slots](https://pypi.org/project/flake8-slots/)
 - [flake8-super](https://pypi.org/project/flake8-super/)
 - [flake8-tidy-imports](https://pypi.org/project/flake8-tidy-imports/)
+- [flake8-todos](https://pypi.org/project/flake8-todos/)
 - [flake8-type-checking](https://pypi.org/project/flake8-type-checking/)
 - [flake8-use-pathlib](https://pypi.org/project/flake8-use-pathlib/)
+- [flynt](https://pypi.org/project/flynt/) ([#2102](https://github.com/astral-sh/ruff/issues/2102))
 - [isort](https://pypi.org/project/isort/)
 - [mccabe](https://pypi.org/project/mccabe/)
 - [pandas-vet](https://pypi.org/project/pandas-vet/)
 - [pep8-naming](https://pypi.org/project/pep8-naming/)
+- [perflint](https://pypi.org/project/perflint/) ([#4789](https://github.com/astral-sh/ruff/issues/4789))
 - [pydocstyle](https://pypi.org/project/pydocstyle/)
-- [pygrep-hooks](https://github.com/pre-commit/pygrep-hooks) ([#980](https://github.com/charliermarsh/ruff/issues/980))
+- [pygrep-hooks](https://github.com/pre-commit/pygrep-hooks)
 - [pyupgrade](https://pypi.org/project/pyupgrade/)
 - [tryceratops](https://pypi.org/project/tryceratops/)
 - [yesqa](https://github.com/asottile/yesqa)
@@ -88,7 +100,7 @@ There are a few other minor incompatibilities between Ruff and the originating F
 ## How does Ruff compare to Pylint?
 
 At time of writing, Pylint implements ~409 total rules, while Ruff implements 440, of which at least
-89 overlap with the Pylint rule set (you can find the mapping in [#970](https://github.com/charliermarsh/ruff/issues/970)).
+89 overlap with the Pylint rule set (you can find the mapping in [#970](https://github.com/astral-sh/ruff/issues/970)).
 
 Pylint implements many rules that Ruff does not, and vice versa. For example, Pylint does more type
 inference than Ruff (e.g., Pylint can validate the number of arguments in a function call). As such,
@@ -102,7 +114,7 @@ which can cover some of the functionality that Pylint provides.
 Like Flake8, Pylint supports plugins (called "checkers"), while Ruff implements all rules natively.
 Unlike Pylint, Ruff is capable of automatically fixing its own lint violations.
 
-Pylint parity is being tracked in [#970](https://github.com/charliermarsh/ruff/issues/970).
+Pylint parity is being tracked in [#970](https://github.com/astral-sh/ruff/issues/970).
 
 ## How does Ruff compare to Mypy, or Pyright, or Pyre?
 
@@ -125,13 +137,15 @@ Today, Ruff can be used to replace Flake8 when used with any of the following pl
 
 - [flake8-2020](https://pypi.org/project/flake8-2020/)
 - [flake8-annotations](https://pypi.org/project/flake8-annotations/)
-- [flake8-bandit](https://pypi.org/project/flake8-bandit/) ([#1646](https://github.com/charliermarsh/ruff/issues/1646))
+- [flake8-async](https://pypi.org/project/flake8-async)
+- [flake8-bandit](https://pypi.org/project/flake8-bandit/) ([#1646](https://github.com/astral-sh/ruff/issues/1646))
 - [flake8-blind-except](https://pypi.org/project/flake8-blind-except/)
 - [flake8-boolean-trap](https://pypi.org/project/flake8-boolean-trap/)
 - [flake8-bugbear](https://pypi.org/project/flake8-bugbear/)
 - [flake8-builtins](https://pypi.org/project/flake8-builtins/)
 - [flake8-commas](https://pypi.org/project/flake8-commas/)
 - [flake8-comprehensions](https://pypi.org/project/flake8-comprehensions/)
+- [flake8-copyright](https://pypi.org/project/flake8-comprehensions/)
 - [flake8-datetimez](https://pypi.org/project/flake8-datetimez/)
 - [flake8-debugger](https://pypi.org/project/flake8-debugger/)
 - [flake8-django](https://pypi.org/project/flake8-django/)
@@ -152,13 +166,17 @@ Today, Ruff can be used to replace Flake8 when used with any of the following pl
 - [flake8-return](https://pypi.org/project/flake8-return/)
 - [flake8-self](https://pypi.org/project/flake8-self/)
 - [flake8-simplify](https://pypi.org/project/flake8-simplify/)
+- [flake8-slots](https://pypi.org/project/flake8-slots/)
 - [flake8-super](https://pypi.org/project/flake8-super/)
 - [flake8-tidy-imports](https://pypi.org/project/flake8-tidy-imports/)
+- [flake8-todos](https://pypi.org/project/flake8-todos/)
 - [flake8-type-checking](https://pypi.org/project/flake8-type-checking/)
 - [flake8-use-pathlib](https://pypi.org/project/flake8-use-pathlib/)
+- [flynt](https://pypi.org/project/flynt/) ([#2102](https://github.com/astral-sh/ruff/issues/2102))
 - [mccabe](https://pypi.org/project/mccabe/)
 - [pandas-vet](https://pypi.org/project/pandas-vet/)
 - [pep8-naming](https://pypi.org/project/pep8-naming/)
+- [perflint](https://pypi.org/project/perflint/) ([#4789](https://github.com/astral-sh/ruff/issues/4789))
 - [pydocstyle](https://pypi.org/project/pydocstyle/)
 - [tryceratops](https://pypi.org/project/tryceratops/)
 
@@ -167,7 +185,7 @@ Ruff can also replace [isort](https://pypi.org/project/isort/),
 most of the rules implemented in [pyupgrade](https://pypi.org/project/pyupgrade/).
 
 If you're looking to use Ruff, but rely on an unsupported Flake8 plugin, feel free to file an
-[issue](https://github.com/charliermarsh/ruff/issues/new).
+[issue](https://github.com/astral-sh/ruff/issues/new).
 
 ## What versions of Python does Ruff support?
 
@@ -192,7 +210,7 @@ on Rust at all.
 ## Can I write my own plugins for Ruff?
 
 Ruff does not yet support third-party plugins, though a plugin system is within-scope for the
-project. See [#283](https://github.com/charliermarsh/ruff/issues/283) for more.
+project. See [#283](https://github.com/astral-sh/ruff/issues/283) for more.
 
 ## How does Ruff's import sorting compare to [isort](https://pypi.org/project/isort/)?
 
@@ -200,8 +218,8 @@ Ruff's import sorting is intended to be near-equivalent to isort's when using is
 `profile = "black"`.
 
 There are a few known differences in how Ruff and isort treat aliased imports, and in how Ruff and
-isort treat inline comments in some cases (see: [#1381](https://github.com/charliermarsh/ruff/issues/1381),
-[#2104](https://github.com/charliermarsh/ruff/issues/2104)).
+isort treat inline comments in some cases (see: [#1381](https://github.com/astral-sh/ruff/issues/1381),
+[#2104](https://github.com/astral-sh/ruff/issues/2104)).
 
 For example, Ruff tends to group non-aliased imports from the same module:
 
@@ -243,9 +261,71 @@ src = ["src", "tests"]
 known-first-party = ["my_module1", "my_module2"]
 ```
 
+## How does Ruff determine which of my imports are first-party, third-party, etc.?
+
+Ruff accepts a `src` option that in your `pyproject.toml`, `ruff.toml`, or `.ruff.toml` file, which
+specifies the directories that Ruff should consider when determining whether an import is
+first-party.
+
+For example, if you have a project with the following structure:
+
+```tree
+.
+├── pyproject.toml
+├── src
+│   ├── __init__.py
+│   ├── module1.py
+│   └── module2.py
+└── tests
+    ├── __init__.py
+    ├── test_module1.py
+    └── test_module2.py
+```
+
+When Ruff sees an import like `import module1`, it will then iterate over the `src` directories,
+looking for a corresponding Python module. You can configure Ruff to consider `src` and `tests` as
+first-party sources like so:
+
+```toml
+[tool.ruff]
+src = ["src", "tests"]
+```
+
+If the `src` field is omitted, Ruff will default to using the "project root" as the only
+first-party source. The "project root" is typically the directory containing your `pyproject.toml`,
+`ruff.toml`, or `.ruff.toml` file, unless a configuration file is provided on the command-line via
+the `--config` option, in which case, the current working directory is used as the project root.
+
+If your `pyproject.toml`, `ruff.toml`, or `.ruff.toml` extends another configuration file, Ruff
+will still use the "extended" configuration file's directory as the project root. For example, if
+you add a `ruff.toml` to the `tests` directory in the above example, you'll want to explicitly
+set the `src` option in the extended configuration file:
+
+```toml
+# tests/ruff.toml
+extend = "../pyproject.toml"
+src = ["../src", "../test"]
+```
+
 ## Does Ruff support Jupyter Notebooks?
 
-Ruff is integrated into [nbQA](https://github.com/nbQA-dev/nbQA), a tool for running linters and
+Ruff has built-in experimental support for linting [Jupyter Notebooks](https://jupyter.org/).
+
+To opt in to linting Jupyter Notebook (`.ipynb`) files, add the `*.ipynb` pattern to your
+[`include`](settings.md#include) setting, like so:
+
+```toml
+[tool.ruff]
+include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
+```
+
+This will prompt Ruff to discover Jupyter Notebook (`.ipynb`) files in any specified
+directories, and lint them accordingly.
+
+Alternatively, pass the notebook file(s) to `ruff` on the command-line directly. For example,
+`ruff check /path/to/notebook.ipynb` will always lint `notebook.ipynb`.
+
+Ruff also integrates with [nbQA](https://github.com/nbQA-dev/nbQA), a tool for running linters and
 code formatters over Jupyter Notebooks.
 
 After installing `ruff` and `nbqa`, you can run Ruff over a notebook like so:
@@ -261,7 +341,7 @@ Found 3 errors.
 
 ## Does Ruff support NumPy- or Google-style docstrings?
 
-Yes! To enable specific docstring convention, add the following to your `pyproject.toml`:
+Yes! To enforce a docstring convention, add the following to your `pyproject.toml`:
 
 ```toml
 [tool.ruff.pydocstyle]
@@ -272,7 +352,8 @@ For example, if you're coming from flake8-docstrings, and your originating confi
 `--docstring-convention=numpy`, you'd instead set `convention = "numpy"` in your `pyproject.toml`,
 as above.
 
-Alongside `convention`, you'll want to explicitly enable the `D` rule code prefix, like so:
+Alongside `convention`, you'll want to explicitly enable the `D` rule code prefix, since the `D`
+rules are not enabled by default:
 
 ```toml
 [tool.ruff]
@@ -286,6 +367,8 @@ convention = "google"
 
 Setting a `convention` force-disables any rules that are incompatible with that convention, no
 matter how they're provided, which avoids accidental incompatibilities and simplifies configuration.
+By default, no `convention` is set, and so the enabled rules are determined by the `select` setting
+alone.
 
 ## How can I tell what settings Ruff is using to check my code?
 
@@ -356,5 +439,5 @@ Ruff's color output is powered by the [`colored`](https://crates.io/crates/color
 attempts to automatically detect whether the output stream supports color. However, you can force
 colors off by setting the `NO_COLOR` environment variable to any value (e.g., `NO_COLOR=1`).
 
-[`colored`](https://crates.io/crates/colored) also supports the the `CLICOLOR` and `CLICOLOR_FORCE`
+[`colored`](https://crates.io/crates/colored) also supports the `CLICOLOR` and `CLICOLOR_FORCE`
 environment variables (see the [spec](https://bixense.com/clicolors/)).

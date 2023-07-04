@@ -1,11 +1,11 @@
 use std::string::ToString;
 
+use ruff_text_size::TextRange;
 use rustc_hash::FxHashSet;
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword, KeywordData};
+use rustpython_parser::ast::{self, Constant, Expr, Identifier, Keyword};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Violation};
+use ruff_diagnostics::{AlwaysAutofixableViolation, AutofixKind, Diagnostic, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -17,9 +17,28 @@ use super::super::fixes::{
 };
 use super::super::format::FormatSummary;
 
+/// ## What it does
+/// Checks for invalid `printf`-style format strings.
+///
+/// ## Why is this bad?
+/// Conversion specifiers are required for `printf`-style format strings. These
+/// specifiers must contain a `%` character followed by a conversion type.
+///
+/// ## Example
+/// ```python
+/// "Hello, %" % "world"
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, %s" % "world"
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatInvalidFormat {
-    pub message: String,
+    pub(crate) message: String,
 }
 
 impl Violation for PercentFormatInvalidFormat {
@@ -30,6 +49,32 @@ impl Violation for PercentFormatInvalidFormat {
     }
 }
 
+/// ## What it does
+/// Checks for named placeholders in `printf`-style format strings without
+/// mapping-type values.
+///
+/// ## Why is this bad?
+/// When using named placeholders in `printf`-style format strings, the values
+/// must be a map type (such as a dictionary). Otherwise, the expression will
+/// raise a `TypeError`.
+///
+/// ## Example
+/// ```python
+/// "%(greeting)s, %(name)s" % ("Hello", "World")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "%(greeting)s, %(name)s" % {"greeting": "Hello", "name": "World"}
+/// ```
+///
+/// Or:
+/// ```python
+/// "%s, %s" % ("Hello", "World")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatExpectedMapping;
 
@@ -40,6 +85,32 @@ impl Violation for PercentFormatExpectedMapping {
     }
 }
 
+/// ## What it does
+/// Checks for uses of mapping-type values in `printf`-style format strings
+/// without named placeholders.
+///
+/// ## Why is this bad?
+/// When using mapping-type values (such as `dict`) in `printf`-style format
+/// strings, the keys must be named. Otherwise, the expression will raise a
+/// `TypeError`.
+///
+/// ## Example
+/// ```python
+/// "%s, %s" % {"greeting": "Hello", "name": "World"}
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "%(greeting)s, %(name)s" % {"greeting": "Hello", "name": "World"}
+/// ```
+///
+/// Or:
+/// ```python
+/// "%s, %s" % ("Hello", "World")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatExpectedSequence;
 
@@ -50,9 +121,28 @@ impl Violation for PercentFormatExpectedSequence {
     }
 }
 
+/// ## What it does
+/// Checks for unused mapping keys in `printf`-style format strings.
+///
+/// ## Why is this bad?
+/// Unused named placeholders in `printf`-style format strings are unnecessary,
+/// and likely indicative of a mistake. They should be removed.
+///
+/// ## Example
+/// ```python
+/// "Hello, %(name)s" % {"greeting": "Hello", "name": "World"}
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, %(name)s" % {"name": "World"}
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatExtraNamedArguments {
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
 impl AlwaysAutofixableViolation for PercentFormatExtraNamedArguments {
@@ -70,9 +160,29 @@ impl AlwaysAutofixableViolation for PercentFormatExtraNamedArguments {
     }
 }
 
+/// ## What it does
+/// Checks for named placeholders in `printf`-style format strings that are not
+/// present in the provided mapping.
+///
+/// ## Why is this bad?
+/// Named placeholders that lack a corresponding value in the provided mapping
+/// will raise a `KeyError`.
+///
+/// ## Example
+/// ```python
+/// "%(greeting)s, %(name)s" % {"name": "world"}
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, %(name)s" % {"name": "world"}
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatMissingArgument {
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
 impl Violation for PercentFormatMissingArgument {
@@ -84,6 +194,32 @@ impl Violation for PercentFormatMissingArgument {
     }
 }
 
+/// ## What it does
+/// Checks for `printf`-style format strings that have mixed positional and
+/// named placeholders.
+///
+/// ## Why is this bad?
+/// Python does not support mixing positional and named placeholders in
+/// `printf`-style format strings. The use of mixed placeholders will raise a
+/// `TypeError` at runtime.
+///
+/// ## Example
+/// ```python
+/// "%s, %(name)s" % ("Hello", {"name": "World"})
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "%s, %s" % ("Hello", "World")
+/// ```
+///
+/// Or:
+/// ```python
+/// "%(greeting)s, %(name)s" % {"greeting": "Hello", "name": "World"}
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatMixedPositionalAndNamed;
 
@@ -94,10 +230,30 @@ impl Violation for PercentFormatMixedPositionalAndNamed {
     }
 }
 
+/// ## What it does
+/// Checks for `printf`-style format strings that have a mismatch between the
+/// number of positional placeholders and the number of substitution values.
+///
+/// ## Why is this bad?
+/// When a `printf`-style format string is provided with too many or too few
+/// substitution values, it will raise a `TypeError` at runtime.
+///
+/// ## Example
+/// ```python
+/// "%s, %s" % ("Hello", "world", "!")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "%s, %s" % ("Hello", "world")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatPositionalCountMismatch {
-    pub wanted: usize,
-    pub got: usize,
+    wanted: usize,
+    got: usize,
 }
 
 impl Violation for PercentFormatPositionalCountMismatch {
@@ -108,6 +264,30 @@ impl Violation for PercentFormatPositionalCountMismatch {
     }
 }
 
+/// ## What it does
+/// Checks for `printf`-style format strings that use the `*` specifier with
+/// non-tuple values.
+///
+/// ## Why is this bad?
+/// The use of the `*` specifier with non-tuple values will raise a
+/// `TypeError` at runtime.
+///
+/// ## Example
+/// ```python
+/// from math import pi
+///
+/// "%(n).*f" % {"n": (2, pi)}
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from math import pi
+///
+/// "%.*f" % (2, pi)  # 3.14
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatStarRequiresSequence;
 
@@ -118,9 +298,29 @@ impl Violation for PercentFormatStarRequiresSequence {
     }
 }
 
+/// ## What it does
+/// Checks for `printf`-style format strings with invalid format characters.
+///
+/// ## Why is this bad?
+/// In `printf`-style format strings, the `%` character is used to indicate
+/// placeholders. If a `%` character is not followed by a valid format
+/// character, it will raise a `ValueError` at runtime.
+///
+/// ## Example
+/// ```python
+/// "Hello, %S" % "world"
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, %s" % "world"
+/// ```
+///
+/// ## References
+/// - [Python documentation: `printf`-style String Formatting](https://docs.python.org/3/library/stdtypes.html#printf-style-string-formatting)
 #[violation]
 pub struct PercentFormatUnsupportedFormatCharacter {
-    pub char: char,
+    pub(crate) char: char,
 }
 
 impl Violation for PercentFormatUnsupportedFormatCharacter {
@@ -131,9 +331,27 @@ impl Violation for PercentFormatUnsupportedFormatCharacter {
     }
 }
 
+/// ## What it does
+/// Checks for `str.format` calls with invalid format strings.
+///
+/// ## Why is this bad?
+/// Invalid format strings will raise a `ValueError`.
+///
+/// ## Example
+/// ```python
+/// "{".format(foo)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "{}".format(foo)
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
 #[violation]
 pub struct StringDotFormatInvalidFormat {
-    pub message: String,
+    pub(crate) message: String,
 }
 
 impl Violation for StringDotFormatInvalidFormat {
@@ -144,12 +362,33 @@ impl Violation for StringDotFormatInvalidFormat {
     }
 }
 
+/// ## What it does
+/// Checks for `str.format` calls with unused keyword arguments.
+///
+/// ## Why is this bad?
+/// Unused keyword arguments are redundant, and often indicative of a mistake.
+/// They should be removed.
+///
+/// ## Example
+/// ```python
+/// "Hello, {name}".format(greeting="Hello", name="World")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, {name}".format(name="World")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
 #[violation]
 pub struct StringDotFormatExtraNamedArguments {
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
-impl AlwaysAutofixableViolation for StringDotFormatExtraNamedArguments {
+impl Violation for StringDotFormatExtraNamedArguments {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         let StringDotFormatExtraNamedArguments { missing } = self;
@@ -157,19 +396,40 @@ impl AlwaysAutofixableViolation for StringDotFormatExtraNamedArguments {
         format!("`.format` call has unused named argument(s): {message}")
     }
 
-    fn autofix_title(&self) -> String {
+    fn autofix_title(&self) -> Option<String> {
         let StringDotFormatExtraNamedArguments { missing } = self;
         let message = missing.join(", ");
-        format!("Remove extra named arguments: {message}")
+        Some(format!("Remove extra named arguments: {message}"))
     }
 }
 
+/// ## What it does
+/// Checks for `str.format` calls with unused positional arguments.
+///
+/// ## Why is this bad?
+/// Unused positional arguments are redundant, and often indicative of a mistake.
+/// They should be removed.
+///
+/// ## Example
+/// ```python
+/// "Hello, {0}".format("world", "!")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "Hello, {0}".format("world")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
 #[violation]
 pub struct StringDotFormatExtraPositionalArguments {
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
-impl AlwaysAutofixableViolation for StringDotFormatExtraPositionalArguments {
+impl Violation for StringDotFormatExtraPositionalArguments {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         let StringDotFormatExtraPositionalArguments { missing } = self;
@@ -177,16 +437,37 @@ impl AlwaysAutofixableViolation for StringDotFormatExtraPositionalArguments {
         format!("`.format` call has unused arguments at position(s): {message}")
     }
 
-    fn autofix_title(&self) -> String {
+    fn autofix_title(&self) -> Option<String> {
         let StringDotFormatExtraPositionalArguments { missing } = self;
         let message = missing.join(", ");
-        format!("Remove extra positional arguments at position(s): {message}")
+        Some(format!(
+            "Remove extra positional arguments at position(s): {message}"
+        ))
     }
 }
 
+/// ## What it does
+/// Checks for `str.format` calls with placeholders that are missing arguments.
+///
+/// ## Why is this bad?
+/// In `str.format` calls, omitting arguments for placeholders will raise a
+/// `KeyError` at runtime.
+///
+/// ## Example
+/// ```python
+/// "{greeting}, {name}".format(name="World")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "{greeting}, {name}".format(greeting="Hello", name="World")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
 #[violation]
 pub struct StringDotFormatMissingArguments {
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
 impl Violation for StringDotFormatMissingArguments {
@@ -198,6 +479,30 @@ impl Violation for StringDotFormatMissingArguments {
     }
 }
 
+/// ## What it does
+/// Checks for `str.format` calls that mix automatic and manual numbering.
+///
+/// ## Why is this bad?
+/// In `str.format` calls, mixing automatic and manual numbering will raise a
+/// `ValueError` at runtime.
+///
+/// ## Example
+/// ```python
+/// "{0}, {}".format("Hello", "World")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "{0}, {1}".format("Hello", "World")
+/// ```
+///
+/// Or:
+/// ```python
+/// "{}, {}".format("Hello", "World")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.format`](https://docs.python.org/3/library/stdtypes.html#str.format)
 #[violation]
 pub struct StringDotFormatMixingAutomatic;
 
@@ -209,15 +514,13 @@ impl Violation for StringDotFormatMixingAutomatic {
 }
 
 fn has_star_star_kwargs(keywords: &[Keyword]) -> bool {
-    keywords.iter().any(|k| {
-        let KeywordData { arg, .. } = &k.node;
-        arg.is_none()
-    })
+    keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword { arg: None, .. }))
 }
 
 fn has_star_args(args: &[Expr]) -> bool {
-    args.iter()
-        .any(|arg| matches!(&arg.node, ExprKind::Starred { .. }))
+    args.iter().any(Expr::is_starred_expr)
 }
 
 /// F502
@@ -225,17 +528,17 @@ pub(crate) fn percent_format_expected_mapping(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
     if !summary.keywords.is_empty() {
         // Tuple, List, Set (+comprehensions)
-        match right.node {
-            ExprKind::List { .. }
-            | ExprKind::Tuple { .. }
-            | ExprKind::Set { .. }
-            | ExprKind::ListComp { .. }
-            | ExprKind::SetComp { .. }
-            | ExprKind::GeneratorExp { .. } => checker
+        match right {
+            Expr::List(_)
+            | Expr::Tuple(_)
+            | Expr::Set(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::GeneratorExp(_) => checker
                 .diagnostics
                 .push(Diagnostic::new(PercentFormatExpectedMapping, location)),
             _ => {}
@@ -248,14 +551,9 @@ pub(crate) fn percent_format_expected_sequence(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
-    if summary.num_positional > 1
-        && matches!(
-            right.node,
-            ExprKind::Dict { .. } | ExprKind::DictComp { .. }
-        )
-    {
+    if summary.num_positional > 1 && matches!(right, Expr::Dict(_) | Expr::DictComp(_)) {
         checker
             .diagnostics
             .push(Diagnostic::new(PercentFormatExpectedSequence, location));
@@ -267,33 +565,31 @@ pub(crate) fn percent_format_extra_named_arguments(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
     if summary.num_positional > 0 {
         return;
     }
-    let ExprKind::Dict { keys, .. } = &right.node else {
+    let Expr::Dict(ast::ExprDict { keys, .. }) = &right else {
         return;
     };
-    if keys.iter().any(std::option::Option::is_none) {
-        return; // contains **x splat
+    // If any of the keys are spread, abort.
+    if keys.iter().any(Option::is_none) {
+        return;
     }
 
-    let missing: Vec<&str> = keys
+    let missing: Vec<(usize, &str)> = keys
         .iter()
-        .filter_map(|k| match k {
-            Some(Expr {
-                node:
-                    ExprKind::Constant {
-                        value: Constant::Str(value),
-                        ..
-                    },
+        .enumerate()
+        .filter_map(|(index, key)| match key {
+            Some(Expr::Constant(ast::ExprConstant {
+                value: Constant::Str(value),
                 ..
-            }) => {
+            })) => {
                 if summary.keywords.contains(value) {
                     None
                 } else {
-                    Some(value.as_str())
+                    Some((index, value.as_str()))
                 }
             }
             _ => None,
@@ -304,20 +600,24 @@ pub(crate) fn percent_format_extra_named_arguments(
         return;
     }
 
+    let names: Vec<String> = missing
+        .iter()
+        .map(|(_, name)| (*name).to_string())
+        .collect();
     let mut diagnostic = Diagnostic::new(
-        PercentFormatExtraNamedArguments {
-            missing: missing.iter().map(|&arg| arg.to_string()).collect(),
-        },
+        PercentFormatExtraNamedArguments { missing: names },
         location,
     );
     if checker.patch(diagnostic.kind.rule()) {
+        let indexes: Vec<usize> = missing.iter().map(|(index, _)| *index).collect();
         diagnostic.try_set_fix(|| {
-            remove_unused_format_arguments_from_dict(
-                &missing,
+            let edit = remove_unused_format_arguments_from_dict(
+                &indexes,
                 right,
                 checker.locator,
                 checker.stylist,
-            )
+            )?;
+            Ok(Fix::automatic(edit))
         });
     }
     checker.diagnostics.push(diagnostic);
@@ -328,24 +628,24 @@ pub(crate) fn percent_format_missing_arguments(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
     if summary.num_positional > 0 {
         return;
     }
 
-    if let ExprKind::Dict { keys, .. } = &right.node {
-        if keys.iter().any(std::option::Option::is_none) {
+    if let Expr::Dict(ast::ExprDict { keys, .. }) = &right {
+        if keys.iter().any(Option::is_none) {
             return; // contains **x splat
         }
 
         let mut keywords = FxHashSet::default();
         for key in keys.iter().flatten() {
-            match &key.node {
-                ExprKind::Constant {
+            match key {
+                Expr::Constant(ast::ExprConstant {
                     value: Constant::Str(value),
                     ..
-                } => {
+                }) => {
                     keywords.insert(value);
                 }
                 _ => {
@@ -375,7 +675,7 @@ pub(crate) fn percent_format_missing_arguments(
 pub(crate) fn percent_format_mixed_positional_and_named(
     checker: &mut Checker,
     summary: &CFormatSummary,
-    location: Range,
+    location: TextRange,
 ) {
     if !(summary.num_positional == 0 || summary.keywords.is_empty()) {
         checker.diagnostics.push(Diagnostic::new(
@@ -390,17 +690,19 @@ pub(crate) fn percent_format_positional_count_mismatch(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
     if !summary.keywords.is_empty() {
         return;
     }
 
-    match &right.node {
-        ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } | ExprKind::Set { elts, .. } => {
+    match right {
+        Expr::List(ast::ExprList { elts, .. })
+        | Expr::Tuple(ast::ExprTuple { elts, .. })
+        | Expr::Set(ast::ExprSet { elts, .. }) => {
             let mut found = 0;
             for elt in elts {
-                if let ExprKind::Starred { .. } = &elt.node {
+                if let Expr::Starred(_) = &elt {
                     return;
                 }
                 found += 1;
@@ -425,11 +727,11 @@ pub(crate) fn percent_format_star_requires_sequence(
     checker: &mut Checker,
     summary: &CFormatSummary,
     right: &Expr,
-    location: Range,
+    location: TextRange,
 ) {
     if summary.starred {
-        match &right.node {
-            ExprKind::Dict { .. } | ExprKind::DictComp { .. } => checker
+        match right {
+            Expr::Dict(_) | Expr::DictComp(_) => checker
                 .diagnostics
                 .push(Diagnostic::new(PercentFormatStarRequiresSequence, location)),
             _ => {}
@@ -442,23 +744,24 @@ pub(crate) fn string_dot_format_extra_named_arguments(
     checker: &mut Checker,
     summary: &FormatSummary,
     keywords: &[Keyword],
-    location: Range,
+    location: TextRange,
 ) {
+    // If there are any **kwargs, abort.
     if has_star_star_kwargs(keywords) {
         return;
     }
 
-    let keywords = keywords.iter().filter_map(|k| {
-        let KeywordData { arg, .. } = &k.node;
-        arg.as_ref()
-    });
+    let keywords = keywords
+        .iter()
+        .filter_map(|Keyword { arg, .. }| arg.as_ref());
 
-    let missing: Vec<&str> = keywords
-        .filter_map(|arg| {
-            if summary.keywords.contains(arg) {
+    let missing: Vec<(usize, &str)> = keywords
+        .enumerate()
+        .filter_map(|(index, keyword)| {
+            if summary.keywords.contains(keyword.as_ref()) {
                 None
             } else {
-                Some(arg.as_str())
+                Some((index, keyword.as_str()))
             }
         })
         .collect();
@@ -467,20 +770,24 @@ pub(crate) fn string_dot_format_extra_named_arguments(
         return;
     }
 
+    let names: Vec<String> = missing
+        .iter()
+        .map(|(_, name)| (*name).to_string())
+        .collect();
     let mut diagnostic = Diagnostic::new(
-        StringDotFormatExtraNamedArguments {
-            missing: missing.iter().map(|&arg| arg.to_string()).collect(),
-        },
+        StringDotFormatExtraNamedArguments { missing: names },
         location,
     );
     if checker.patch(diagnostic.kind.rule()) {
+        let indexes: Vec<usize> = missing.iter().map(|(index, _)| *index).collect();
         diagnostic.try_set_fix(|| {
-            remove_unused_keyword_arguments_from_format_call(
-                &missing,
+            let edit = remove_unused_keyword_arguments_from_format_call(
+                &indexes,
                 location,
                 checker.locator,
                 checker.stylist,
-            )
+            )?;
+            Ok(Fix::automatic(edit))
         });
     }
     checker.diagnostics.push(diagnostic);
@@ -491,15 +798,13 @@ pub(crate) fn string_dot_format_extra_positional_arguments(
     checker: &mut Checker,
     summary: &FormatSummary,
     args: &[Expr],
-    location: Range,
+    location: TextRange,
 ) {
     let missing: Vec<usize> = args
         .iter()
         .enumerate()
         .filter(|(i, arg)| {
-            !(matches!(arg.node, ExprKind::Starred { .. })
-                || summary.autos.contains(i)
-                || summary.indices.contains(i))
+            !(arg.is_starred_expr() || summary.autos.contains(i) || summary.indices.contains(i))
         })
         .map(|(i, _)| i)
         .collect();
@@ -512,21 +817,48 @@ pub(crate) fn string_dot_format_extra_positional_arguments(
         StringDotFormatExtraPositionalArguments {
             missing: missing
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(ToString::to_string)
                 .collect::<Vec<String>>(),
         },
         location,
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
-            remove_unused_positional_arguments_from_format_call(
-                &missing,
-                location,
-                checker.locator,
-                checker.stylist,
-                &summary.format_string,
-            )
-        });
+        // We can only fix if the positional arguments we're removing don't require re-indexing
+        // the format string itself. For example, we can't fix `"{1}{2}".format(0, 1, 2)"`, since
+        // this requires changing the format string to `"{0}{1}"`. But we can fix
+        // `"{0}{1}".format(0, 1, 2)`, since this only requires modifying the call arguments.
+        fn is_contiguous_from_end<T>(indexes: &[usize], target: &[T]) -> bool {
+            if indexes.is_empty() {
+                return true;
+            }
+
+            let mut expected_index = target.len() - 1;
+            for &index in indexes.iter().rev() {
+                if index != expected_index {
+                    return false;
+                }
+
+                if expected_index == 0 {
+                    break;
+                }
+
+                expected_index -= 1;
+            }
+
+            true
+        }
+
+        if is_contiguous_from_end(&missing, args) {
+            diagnostic.try_set_fix(|| {
+                let edit = remove_unused_positional_arguments_from_format_call(
+                    &missing,
+                    location,
+                    checker.locator,
+                    checker.stylist,
+                )?;
+                Ok(Fix::automatic(edit))
+            });
+        }
     }
     checker.diagnostics.push(diagnostic);
 }
@@ -537,7 +869,7 @@ pub(crate) fn string_dot_format_missing_argument(
     summary: &FormatSummary,
     args: &[Expr],
     keywords: &[Keyword],
-    location: Range,
+    location: TextRange,
 ) {
     if has_star_args(args) || has_star_star_kwargs(keywords) {
         return;
@@ -546,8 +878,8 @@ pub(crate) fn string_dot_format_missing_argument(
     let keywords: FxHashSet<_> = keywords
         .iter()
         .filter_map(|k| {
-            let KeywordData { arg, .. } = &k.node;
-            arg.as_ref()
+            let Keyword { arg, .. } = &k;
+            arg.as_ref().map(Identifier::as_str)
         })
         .collect();
 
@@ -561,7 +893,7 @@ pub(crate) fn string_dot_format_missing_argument(
             summary
                 .keywords
                 .iter()
-                .filter(|k| !keywords.contains(k))
+                .filter(|k| !keywords.contains(k.as_str()))
                 .cloned(),
         )
         .collect();
@@ -578,7 +910,7 @@ pub(crate) fn string_dot_format_missing_argument(
 pub(crate) fn string_dot_format_mixing_automatic(
     checker: &mut Checker,
     summary: &FormatSummary,
-    location: Range,
+    location: TextRange,
 ) {
     if !(summary.autos.is_empty() || summary.indices.is_empty()) {
         checker

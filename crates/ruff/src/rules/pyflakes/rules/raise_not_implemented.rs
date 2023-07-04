@@ -1,36 +1,65 @@
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Expr, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for `raise` statements that raise `NotImplemented`.
+///
+/// ## Why is this bad?
+/// `NotImplemented` is an exception used by binary special methods to indicate
+/// that an operation is not implemented with respect to a particular type.
+///
+/// `NotImplemented` should not be raised directly. Instead, raise
+/// `NotImplementedError`, which is used to indicate that the method is
+/// abstract or not implemented in the derived class.
+///
+/// ## Example
+/// ```python
+/// class Foo:
+///     def bar(self):
+///         raise NotImplemented
+/// ```
+///
+/// Use instead:
+/// ```python
+/// class Foo:
+///     def bar(self):
+///         raise NotImplementedError
+/// ```
+///
+/// ## References
+/// - [Python documentation: `NotImplemented`](https://docs.python.org/3/library/constants.html#NotImplemented)
+/// - [Python documentation: `NotImplementedError`](https://docs.python.org/3/library/exceptions.html#NotImplementedError)
 #[violation]
 pub struct RaiseNotImplemented;
 
-impl AlwaysAutofixableViolation for RaiseNotImplemented {
+impl Violation for RaiseNotImplemented {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         format!("`raise NotImplemented` should be `raise NotImplementedError`")
     }
 
-    fn autofix_title(&self) -> String {
-        "Use `raise NotImplementedError`".to_string()
+    fn autofix_title(&self) -> Option<String> {
+        Some("Use `raise NotImplementedError`".to_string())
     }
 }
 
 fn match_not_implemented(expr: &Expr) -> Option<&Expr> {
-    match &expr.node {
-        ExprKind::Call { func, .. } => {
-            if let ExprKind::Name { id, .. } = &func.node {
+    match expr {
+        Expr::Call(ast::ExprCall { func, .. }) => {
+            if let Expr::Name(ast::ExprName { id, .. }) = func.as_ref() {
                 if id == "NotImplemented" {
                     return Some(func);
                 }
             }
         }
-        ExprKind::Name { id, .. } => {
+        Expr::Name(ast::ExprName { id, .. }) => {
             if id == "NotImplemented" {
                 return Some(expr);
             }
@@ -41,17 +70,18 @@ fn match_not_implemented(expr: &Expr) -> Option<&Expr> {
 }
 
 /// F901
-pub fn raise_not_implemented(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn raise_not_implemented(checker: &mut Checker, expr: &Expr) {
     let Some(expr) = match_not_implemented(expr) else {
         return;
     };
-    let mut diagnostic = Diagnostic::new(RaiseNotImplemented, Range::from(expr));
+    let mut diagnostic = Diagnostic::new(RaiseNotImplemented, expr.range());
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            "NotImplementedError".to_string(),
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+        if checker.semantic().is_builtin("NotImplementedError") {
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                "NotImplementedError".to_string(),
+                expr.range(),
+            )));
+        }
     }
     checker.diagnostics.push(diagnostic);
 }

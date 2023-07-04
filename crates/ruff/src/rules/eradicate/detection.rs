@@ -1,11 +1,12 @@
 /// See: [eradicate.py](https://github.com/myint/eradicate/blob/98f199940979c94447a461d50d27862b118b282d/eradicate.py)
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rustpython_parser as parser;
+use rustpython_parser::ast::Suite;
+use rustpython_parser::Parse;
 
 static ALLOWLIST_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"^(?i)(?:pylint|pyright|noqa|nosec|type:\s*ignore|fmt:\s*(on|off)|isort:\s*(on|off|skip|skip_file|split|dont-add-imports(:\s*\[.*?])?)|mypy:|SPDX-License-Identifier:)"
+        r"^(?i)(?:pylint|pyright|noqa|nosec|region|endregion|type:\s*ignore|fmt:\s*(on|off)|isort:\s*(on|off|skip|skip_file|split|dont-add-imports(:\s*\[.*?])?)|mypy:|SPDX-License-Identifier:)"
     ).unwrap()
 });
 static BRACKET_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[()\[\]{}\s]+$").unwrap());
@@ -31,7 +32,7 @@ static PARTIAL_DICTIONARY_REGEX: Lazy<Regex> =
 static PRINT_RETURN_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(print|return)\b\s*").unwrap());
 
 /// Returns `true` if a comment contains Python code.
-pub fn comment_contains_code(line: &str, task_tags: &[String]) -> bool {
+pub(crate) fn comment_contains_code(line: &str, task_tags: &[String]) -> bool {
     let line = if let Some(line) = line.trim().strip_prefix('#') {
         line.trim_start_matches([' ', '#'])
     } else {
@@ -78,7 +79,7 @@ pub fn comment_contains_code(line: &str, task_tags: &[String]) -> bool {
     }
 
     // Finally, compile the source code.
-    parser::parse_program(&line, "<filename>").is_ok()
+    Suite::parse(&line, "<filename>").is_ok()
 }
 
 /// Returns `true` if a line is probably part of some multiline code.
@@ -224,6 +225,11 @@ mod tests {
         assert!(!comment_contains_code("# noqa: A123", &[]));
         assert!(!comment_contains_code("# noqa:A123", &[]));
         assert!(!comment_contains_code("# nosec", &[]));
+        assert!(!comment_contains_code("# region", &[]));
+        assert!(!comment_contains_code("# endregion", &[]));
+        assert!(!comment_contains_code("# region.name", &[]));
+        assert!(!comment_contains_code("# region name", &[]));
+        assert!(!comment_contains_code("# region: name", &[]));
         assert!(!comment_contains_code("# fmt: on", &[]));
         assert!(!comment_contains_code("# fmt: off", &[]));
         assert!(!comment_contains_code("# fmt:on", &[]));

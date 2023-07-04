@@ -1,8 +1,7 @@
-use rustpython_parser::ast::Expr;
+use rustpython_parser::ast::{Expr, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -13,7 +12,7 @@ use crate::registry::AsRule;
 /// ## Why is this bad?
 /// NumPy's `np.int` has long been an alias of the builtin `int`. The same
 /// goes for `np.float`, `np.bool`, and others. These aliases exist
-/// primarily primarily for historic reasons, and have been a cause of
+/// primarily for historic reasons, and have been a cause of
 /// frequent confusion for newcomers.
 ///
 /// These aliases were been deprecated in 1.20, and removed in 1.24.
@@ -31,7 +30,7 @@ use crate::registry::AsRule;
 /// ```
 #[violation]
 pub struct NumpyDeprecatedTypeAlias {
-    pub type_name: String,
+    type_name: String,
 }
 
 impl AlwaysAutofixableViolation for NumpyDeprecatedTypeAlias {
@@ -48,39 +47,40 @@ impl AlwaysAutofixableViolation for NumpyDeprecatedTypeAlias {
 }
 
 /// NPY001
-pub fn deprecated_type_alias(checker: &mut Checker, expr: &Expr) {
-    if let Some(type_name) = checker.ctx.resolve_call_path(expr).and_then(|call_path| {
-        if call_path.as_slice() == ["numpy", "bool"]
-            || call_path.as_slice() == ["numpy", "int"]
-            || call_path.as_slice() == ["numpy", "float"]
-            || call_path.as_slice() == ["numpy", "complex"]
-            || call_path.as_slice() == ["numpy", "object"]
-            || call_path.as_slice() == ["numpy", "str"]
-            || call_path.as_slice() == ["numpy", "long"]
-            || call_path.as_slice() == ["numpy", "unicode"]
-        {
-            Some(call_path[1])
-        } else {
-            None
-        }
-    }) {
+pub(crate) fn deprecated_type_alias(checker: &mut Checker, expr: &Expr) {
+    if let Some(type_name) = checker
+        .semantic()
+        .resolve_call_path(expr)
+        .and_then(|call_path| {
+            if matches!(
+                call_path.as_slice(),
+                [
+                    "numpy",
+                    "bool" | "int" | "float" | "complex" | "object" | "str" | "long" | "unicode"
+                ]
+            ) {
+                Some(call_path[1])
+            } else {
+                None
+            }
+        })
+    {
         let mut diagnostic = Diagnostic::new(
             NumpyDeprecatedTypeAlias {
                 type_name: type_name.to_string(),
             },
-            Range::from(expr),
+            expr.range(),
         );
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.set_fix(Edit::replacement(
+            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                 match type_name {
                     "unicode" => "str",
                     "long" => "int",
                     _ => type_name,
                 }
                 .to_string(),
-                expr.location,
-                expr.end_location.unwrap(),
-            ));
+                expr.range(),
+            )));
         }
         checker.diagnostics.push(diagnostic);
     }

@@ -1,10 +1,10 @@
 use std::fmt;
 
-use rustpython_parser::ast::{Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_semantic::SemanticModel;
 
 use crate::checkers::ast::Checker;
 
@@ -14,7 +14,7 @@ use super::helpers;
 /// Checks for the order of Model's inner classes, methods, and fields as per
 /// the [Django Style Guide].
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// The [Django Style Guide] specifies that the order of Model inner classes,
 /// attributes and methods should be as follows:
 ///
@@ -63,20 +63,23 @@ use super::helpers;
 /// [Django Style Guide]: https://docs.djangoproject.com/en/dev/internals/contributing/writing-code/coding-style/#model-style
 #[violation]
 pub struct DjangoUnorderedBodyContentInModel {
-    pub elem_type: ContentType,
-    pub before: ContentType,
+    element_type: ContentType,
+    prev_element_type: ContentType,
 }
 
 impl Violation for DjangoUnorderedBodyContentInModel {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let DjangoUnorderedBodyContentInModel { elem_type, before } = self;
-        format!("Order of model's inner classes, methods, and fields does not follow the Django Style Guide: {elem_type} should come before {before}")
+        let DjangoUnorderedBodyContentInModel {
+            element_type,
+            prev_element_type,
+        } = self;
+        format!("Order of model's inner classes, methods, and fields does not follow the Django Style Guide: {element_type} should come before {prev_element_type}")
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
-pub enum ContentType {
+enum ContentType {
     FieldDeclaration,
     ManagerDeclaration,
     MetaClass,
@@ -100,18 +103,18 @@ impl fmt::Display for ContentType {
     }
 }
 
-fn get_element_type(checker: &Checker, element: &StmtKind) -> Option<ContentType> {
+fn get_element_type(element: &Stmt, semantic: &SemanticModel) -> Option<ContentType> {
     match element {
-        StmtKind::Assign { targets, value, .. } => {
-            if let ExprKind::Call { func, .. } = &value.node {
-                if helpers::is_model_field(&checker.ctx, func) {
+        Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
+            if let Expr::Call(ast::ExprCall { func, .. }) = value.as_ref() {
+                if helpers::is_model_field(func, semantic) {
                     return Some(ContentType::FieldDeclaration);
                 }
             }
             let Some(expr) = targets.first() else {
                 return None;
             };
-            let ExprKind::Name { id, .. } = &expr.node else {
+            let Expr::Name(ast::ExprName { id, .. }) = expr else {
                 return None;
             };
             if id == "objects" {
@@ -120,14 +123,14 @@ fn get_element_type(checker: &Checker, element: &StmtKind) -> Option<ContentType
                 None
             }
         }
-        StmtKind::ClassDef { name, .. } => {
+        Stmt::ClassDef(ast::StmtClassDef { name, .. }) => {
             if name == "Meta" {
                 Some(ContentType::MetaClass)
             } else {
                 None
             }
         }
-        StmtKind::FunctionDef { name, .. } => match name.as_str() {
+        Stmt::FunctionDef(ast::StmtFunctionDef { name, .. }) => match name.as_str() {
             "__str__" => Some(ContentType::StrMethod),
             "save" => Some(ContentType::SaveMethod),
             "get_absolute_url" => Some(ContentType::GetAbsoluteUrlMethod),
@@ -138,31 +141,49 @@ fn get_element_type(checker: &Checker, element: &StmtKind) -> Option<ContentType
 }
 
 /// DJ012
-pub fn unordered_body_content_in_model(checker: &mut Checker, bases: &[Expr], body: &[Stmt]) {
+pub(crate) fn unordered_body_content_in_model(
+    checker: &mut Checker,
+    bases: &[Expr],
+    body: &[Stmt],
+) {
     if !bases
         .iter()
-        .any(|base| helpers::is_model(&checker.ctx, base))
+        .any(|base| helpers::is_model(base, checker.semantic()))
     {
         return;
     }
-    let mut elements_type_found = Vec::new();
+
+    // Track all the element types we've seen so far.
+    let mut element_types = Vec::new();
+    let mut prev_element_type = None;
     for element in body.iter() {
-        let Some(current_element_type) = get_element_type(checker, &element.node) else {
+        let Some(element_type) = get_element_type(element, checker.semantic()) else {
             continue;
         };
-        let Some(&element_type) = elements_type_found
+
+        // Skip consecutive elements of the same type. It's less noisy to only report
+        // violations at type boundaries (e.g., avoid raising a violation for _every_
+        // field declaration that's out of order).
+        if prev_element_type == Some(element_type) {
+            continue;
+        }
+
+        prev_element_type = Some(element_type);
+
+        if let Some(&prev_element_type) = element_types
             .iter()
-            .find(|&&element_type| element_type > current_element_type) else {
-                elements_type_found.push(current_element_type);
-                continue;
-        };
-        let diagnostic = Diagnostic::new(
-            DjangoUnorderedBodyContentInModel {
-                elem_type: current_element_type,
-                before: element_type,
-            },
-            Range::from(element),
-        );
-        checker.diagnostics.push(diagnostic);
+            .find(|&&prev_element_type| prev_element_type > element_type)
+        {
+            let diagnostic = Diagnostic::new(
+                DjangoUnorderedBodyContentInModel {
+                    element_type,
+                    prev_element_type,
+                },
+                element.range(),
+            );
+            checker.diagnostics.push(diagnostic);
+        } else {
+            element_types.push(element_type);
+        }
     }
 }

@@ -1,9 +1,9 @@
-use rustpython_parser::ast::{Constant, Expr, StmtKind};
-use rustpython_parser::ast::{ExprKind, Stmt};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::helpers::is_const_true;
+use ruff_python_semantic::SemanticModel;
 
 use crate::checkers::ast::Checker;
 
@@ -51,27 +51,26 @@ impl Violation for DjangoModelWithoutDunderStr {
 }
 
 /// DJ008
-pub fn model_without_dunder_str(
-    checker: &Checker,
-    bases: &[Expr],
-    body: &[Stmt],
-    class_location: &Stmt,
-) -> Option<Diagnostic> {
-    if !checker_applies(checker, bases, body) {
-        return None;
+pub(crate) fn model_without_dunder_str(
+    checker: &mut Checker,
+    ast::StmtClassDef {
+        name, bases, body, ..
+    }: &ast::StmtClassDef,
+) {
+    if !is_non_abstract_model(bases, body, checker.semantic()) {
+        return;
     }
-    if !has_dunder_method(body) {
-        return Some(Diagnostic::new(
-            DjangoModelWithoutDunderStr,
-            Range::from(class_location),
-        ));
+    if has_dunder_method(body) {
+        return;
     }
-    None
+    checker
+        .diagnostics
+        .push(Diagnostic::new(DjangoModelWithoutDunderStr, name.range()));
 }
 
 fn has_dunder_method(body: &[Stmt]) -> bool {
-    body.iter().any(|val| match &val.node {
-        StmtKind::FunctionDef { name, .. } => {
+    body.iter().any(|val| match val {
+        Stmt::FunctionDef(ast::StmtFunctionDef { name, .. }) => {
             if name == "__str__" {
                 return true;
             }
@@ -81,12 +80,12 @@ fn has_dunder_method(body: &[Stmt]) -> bool {
     })
 }
 
-fn checker_applies(checker: &Checker, bases: &[Expr], body: &[Stmt]) -> bool {
+fn is_non_abstract_model(bases: &[Expr], body: &[Stmt], semantic: &SemanticModel) -> bool {
     for base in bases.iter() {
         if is_model_abstract(body) {
             continue;
         }
-        if helpers::is_model(&checker.ctx, base) {
+        if helpers::is_model(base, semantic) {
             return true;
         }
     }
@@ -96,26 +95,26 @@ fn checker_applies(checker: &Checker, bases: &[Expr], body: &[Stmt]) -> bool {
 /// Check if class is abstract, in terms of Django model inheritance.
 fn is_model_abstract(body: &[Stmt]) -> bool {
     for element in body.iter() {
-        let StmtKind::ClassDef {name, body, ..} = &element.node else {
-            continue
+        let Stmt::ClassDef(ast::StmtClassDef { name, body, .. }) = element else {
+            continue;
         };
         if name != "Meta" {
             continue;
         }
         for element in body.iter() {
-            let StmtKind::Assign {targets, value, ..} = &element.node else {
+            let Stmt::Assign(ast::StmtAssign { targets, value, .. }) = element else {
                 continue;
             };
             for target in targets.iter() {
-                let ExprKind::Name {id , ..} = &target.node else {
+                let Expr::Name(ast::ExprName { id, .. }) = target else {
                     continue;
                 };
                 if id != "abstract" {
                     continue;
                 }
-                let ExprKind::Constant{value: Constant::Bool(true), ..} = &value.node else {
+                if !is_const_true(value) {
                     continue;
-                };
+                }
                 return true;
             }
         }

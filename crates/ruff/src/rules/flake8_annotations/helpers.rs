@@ -1,38 +1,48 @@
-use rustpython_parser::ast::{Arguments, Expr, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Arguments, Expr, Stmt};
 
 use ruff_python_ast::cast;
 use ruff_python_semantic::analyze::visibility;
+use ruff_python_semantic::{Definition, Member, MemberKind, SemanticModel};
 
-use crate::checkers::ast::Checker;
-use crate::docstrings::definition::{Definition, DefinitionKind};
-
-pub(super) fn match_function_def(stmt: &Stmt) -> (&str, &Arguments, Option<&Expr>, &Vec<Stmt>) {
-    match &stmt.node {
-        StmtKind::FunctionDef {
+pub(super) fn match_function_def(
+    stmt: &Stmt,
+) -> (&str, &Arguments, Option<&Expr>, &[Stmt], &[ast::Decorator]) {
+    match stmt {
+        Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
             args,
             returns,
             body,
+            decorator_list,
             ..
-        }
-        | StmtKind::AsyncFunctionDef {
+        })
+        | Stmt::AsyncFunctionDef(ast::StmtAsyncFunctionDef {
             name,
             args,
             returns,
             body,
+            decorator_list,
             ..
-        } => (name, args, returns.as_ref().map(|expr| &**expr), body),
+        }) => (
+            name,
+            args,
+            returns.as_ref().map(|expr| &**expr),
+            body,
+            decorator_list,
+        ),
         _ => panic!("Found non-FunctionDef in match_name"),
     }
 }
 
 /// Return the name of the function, if it's overloaded.
-pub fn overloaded_name(checker: &Checker, definition: &Definition) -> Option<String> {
-    if let DefinitionKind::Function(stmt)
-    | DefinitionKind::NestedFunction(stmt)
-    | DefinitionKind::Method(stmt) = definition.kind
+pub(crate) fn overloaded_name(definition: &Definition, semantic: &SemanticModel) -> Option<String> {
+    if let Definition::Member(Member {
+        kind: MemberKind::Function | MemberKind::NestedFunction | MemberKind::Method,
+        stmt,
+        ..
+    }) = definition
     {
-        if visibility::is_overload(&checker.ctx, cast::decorator_list(stmt)) {
+        if visibility::is_overload(cast::decorator_list(stmt), semantic) {
             let (name, ..) = match_function_def(stmt);
             Some(name.to_string())
         } else {
@@ -45,12 +55,18 @@ pub fn overloaded_name(checker: &Checker, definition: &Definition) -> Option<Str
 
 /// Return `true` if the definition is the implementation for an overloaded
 /// function.
-pub fn is_overload_impl(checker: &Checker, definition: &Definition, overloaded_name: &str) -> bool {
-    if let DefinitionKind::Function(stmt)
-    | DefinitionKind::NestedFunction(stmt)
-    | DefinitionKind::Method(stmt) = definition.kind
+pub(crate) fn is_overload_impl(
+    definition: &Definition,
+    overloaded_name: &str,
+    semantic: &SemanticModel,
+) -> bool {
+    if let Definition::Member(Member {
+        kind: MemberKind::Function | MemberKind::NestedFunction | MemberKind::Method,
+        stmt,
+        ..
+    }) = definition
     {
-        if visibility::is_overload(&checker.ctx, cast::decorator_list(stmt)) {
+        if visibility::is_overload(cast::decorator_list(stmt), semantic) {
             false
         } else {
             let (name, ..) = match_function_def(stmt);

@@ -1,17 +1,43 @@
 use itertools::Itertools;
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Unaryop};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged, UnaryOp};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::unparse_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::rules::pylint::settings::ConstantType;
 
+/// ## What it does
+/// Checks for the use of unnamed numerical constants ("magic") values in
+/// comparisons.
+///
+/// ## Why is this bad?
+/// The use of "magic" values can make code harder to read and maintain, as
+/// readers will have to infer the meaning of the value from the context.
+/// Such values are discouraged by [PEP 8].
+///
+/// For convenience, this rule excludes a variety of common values from the
+/// "magic" value definition, such as `0`, `1`, `""`, and `"__main__"`.
+///
+/// ## Example
+/// ```python
+/// def calculate_discount(price: float) -> float:
+///     return price * (1 - 0.2)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// DISCOUNT_RATE = 0.2
+///
+///
+/// def calculate_discount(price: float) -> float:
+///     return price * (1 - DISCOUNT_RATE)
+/// ```
+///
+/// [PEP 8]: https://peps.python.org/pep-0008/#constants
 #[violation]
 pub struct MagicValueComparison {
-    pub value: String,
+    value: String,
 }
 
 impl Violation for MagicValueComparison {
@@ -26,13 +52,14 @@ impl Violation for MagicValueComparison {
 
 /// If an [`Expr`] is a constant (or unary operation on a constant), return the [`Constant`].
 fn as_constant(expr: &Expr) -> Option<&Constant> {
-    match &expr.node {
-        ExprKind::Constant { value, .. } => Some(value),
-        ExprKind::UnaryOp {
-            op: Unaryop::UAdd | Unaryop::USub | Unaryop::Invert,
+    match expr {
+        Expr::Constant(ast::ExprConstant { value, .. }) => Some(value),
+        Expr::UnaryOp(ast::ExprUnaryOp {
+            op: UnaryOp::UAdd | UnaryOp::USub | UnaryOp::Invert,
             operand,
-        } => match &operand.node {
-            ExprKind::Constant { value, .. } => Some(value),
+            range: _,
+        }) => match operand.as_ref() {
+            Expr::Constant(ast::ExprConstant { value, .. }) => Some(value),
             _ => None,
         },
         _ => None,
@@ -62,7 +89,7 @@ fn is_magic_value(constant: &Constant, allowed_types: &[ConstantType]) -> bool {
 }
 
 /// PLR2004
-pub fn magic_value_comparison(checker: &mut Checker, left: &Expr, comparators: &[Expr]) {
+pub(crate) fn magic_value_comparison(checker: &mut Checker, left: &Expr, comparators: &[Expr]) {
     for (left, right) in std::iter::once(left)
         .chain(comparators.iter())
         .tuple_windows()
@@ -79,9 +106,9 @@ pub fn magic_value_comparison(checker: &mut Checker, left: &Expr, comparators: &
             if is_magic_value(value, &checker.settings.pylint.allow_magic_value_types) {
                 checker.diagnostics.push(Diagnostic::new(
                     MagicValueComparison {
-                        value: unparse_expr(comparison_expr, checker.stylist),
+                        value: checker.generator().expr(comparison_expr),
                     },
-                    Range::from(comparison_expr),
+                    comparison_expr.range(),
                 ));
             }
         }

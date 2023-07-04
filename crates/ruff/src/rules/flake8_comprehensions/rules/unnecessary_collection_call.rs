@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, Keyword};
+use rustpython_parser::ast::{Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -37,7 +36,7 @@ use super::helpers;
 /// ```
 #[violation]
 pub struct UnnecessaryCollectionCall {
-    pub obj_type: String,
+    obj_type: String,
 }
 
 impl AlwaysAutofixableViolation for UnnecessaryCollectionCall {
@@ -53,7 +52,7 @@ impl AlwaysAutofixableViolation for UnnecessaryCollectionCall {
 }
 
 /// C408
-pub fn unnecessary_collection_call(
+pub(crate) fn unnecessary_collection_call(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
@@ -71,7 +70,7 @@ pub fn unnecessary_collection_call(
         "dict"
             if keywords.is_empty()
                 || (!settings.allow_dict_calls_with_keyword_arguments
-                    && keywords.iter().all(|kw| kw.node.arg.is_some())) =>
+                    && keywords.iter().all(|kw| kw.arg.is_some())) =>
         {
             // `dict()` or `dict(a=1)` (as opposed to `dict(**a)`)
         }
@@ -80,19 +79,18 @@ pub fn unnecessary_collection_call(
         }
         _ => return,
     };
-    if !checker.ctx.is_builtin(id) {
+    if !checker.semantic().is_builtin(id) {
         return;
     }
     let mut diagnostic = Diagnostic::new(
         UnnecessaryCollectionCall {
             obj_type: id.to_string(),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
-            fixes::fix_unnecessary_collection_call(checker.locator, checker.stylist, expr)
-        });
+        #[allow(deprecated)]
+        diagnostic.try_set_fix_from_edit(|| fixes::fix_unnecessary_collection_call(checker, expr));
     }
     checker.diagnostics.push(diagnostic);
 }

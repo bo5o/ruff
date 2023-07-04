@@ -4,12 +4,11 @@ use std::{fs, iter};
 
 use log::debug;
 use rustc_hash::FxHashMap;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumIter;
 
 use ruff_macros::CacheKey;
-use ruff_python_stdlib::sys::KNOWN_STANDARD_LIBRARY;
+use ruff_python_stdlib::sys::is_known_standard_library;
 
 use crate::settings::types::PythonVersion;
 use crate::warn_user_once;
@@ -27,11 +26,11 @@ use super::types::{ImportBlock, Importable};
     Hash,
     Serialize,
     Deserialize,
-    JsonSchema,
     CacheKey,
     EnumIter,
 )]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ImportType {
     Future,
     StandardLibrary,
@@ -40,10 +39,9 @@ pub enum ImportType {
     LocalFolder,
 }
 
-#[derive(
-    Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, JsonSchema, CacheKey,
-)]
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Hash, Serialize, Deserialize, CacheKey)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ImportSection {
     Known(ImportType),
     UserDefined(String),
@@ -65,9 +63,9 @@ enum Reason<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn categorize<'a>(
+pub(crate) fn categorize<'a>(
     module_name: &str,
-    level: Option<usize>,
+    level: Option<u32>,
     src: &[PathBuf],
     package: Option<&Path>,
     known_modules: &'a KnownModules,
@@ -84,11 +82,7 @@ pub fn categorize<'a>(
             (&ImportSection::Known(ImportType::Future), Reason::Future)
         } else if let Some((import_type, reason)) = known_modules.categorize(module_name) {
             (import_type, reason)
-        } else if KNOWN_STANDARD_LIBRARY
-            .get(&target_version.as_tuple())
-            .unwrap()
-            .contains(module_base)
-        {
+        } else if is_known_standard_library(target_version.minor(), module_base) {
             (
                 &ImportSection::Known(ImportType::StandardLibrary),
                 Reason::KnownStandardLibrary,
@@ -138,7 +132,7 @@ fn match_sources<'a>(paths: &'a [PathBuf], base: &str) -> Option<&'a Path> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn categorize_imports<'a>(
+pub(crate) fn categorize_imports<'a>(
     block: ImportBlock<'a>,
     src: &[PathBuf],
     package: Option<&Path>,
@@ -146,7 +140,7 @@ pub fn categorize_imports<'a>(
     target_version: PythonVersion,
 ) -> BTreeMap<&'a ImportSection, ImportBlock<'a>> {
     let mut block_by_type: BTreeMap<&ImportSection, ImportBlock> = BTreeMap::default();
-    // Categorize `StmtKind::Import`.
+    // Categorize `Stmt::Import`.
     for (alias, comments) in block.import {
         let import_type = categorize(
             &alias.module_name(),
@@ -162,7 +156,7 @@ pub fn categorize_imports<'a>(
             .import
             .insert(alias, comments);
     }
-    // Categorize `StmtKind::ImportFrom` (without re-export).
+    // Categorize `Stmt::ImportFrom` (without re-export).
     for (import_from, aliases) in block.import_from {
         let classification = categorize(
             &import_from.module_name(),
@@ -178,7 +172,7 @@ pub fn categorize_imports<'a>(
             .import_from
             .insert(import_from, aliases);
     }
-    // Categorize `StmtKind::ImportFrom` (with re-export).
+    // Categorize `Stmt::ImportFrom` (with re-export).
     for ((import_from, alias), aliases) in block.import_from_as {
         let classification = categorize(
             &import_from.module_name(),
@@ -194,7 +188,7 @@ pub fn categorize_imports<'a>(
             .import_from_as
             .insert((import_from, alias), aliases);
     }
-    // Categorize `StmtKind::ImportFrom` (with star).
+    // Categorize `Stmt::ImportFrom` (with star).
     for (import_from, comments) in block.import_from_star {
         let classification = categorize(
             &import_from.module_name(),
@@ -222,7 +216,7 @@ pub struct KnownModules {
 }
 
 impl KnownModules {
-    pub fn new(
+    pub(crate) fn new(
         first_party: Vec<String>,
         third_party: Vec<String>,
         local_folder: Vec<String>,
@@ -320,7 +314,7 @@ impl KnownModules {
     }
 
     /// Return the list of modules that are known to be of a given type.
-    pub fn modules_for_known_type(&self, import_type: ImportType) -> Vec<String> {
+    pub(crate) fn modules_for_known_type(&self, import_type: ImportType) -> Vec<String> {
         self.known
             .iter()
             .filter_map(|(module, known_section)| {
@@ -338,7 +332,7 @@ impl KnownModules {
     }
 
     /// Return the list of user-defined modules, indexed by section.
-    pub fn user_defined(&self) -> FxHashMap<String, Vec<String>> {
+    pub(crate) fn user_defined(&self) -> FxHashMap<String, Vec<String>> {
         let mut user_defined: FxHashMap<String, Vec<String>> = FxHashMap::default();
         for (module, section) in &self.known {
             if let ImportSection::UserDefined(section_name) = section {

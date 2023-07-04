@@ -1,15 +1,39 @@
-use rustpython_parser::ast::{Excepthandler, ExcepthandlerKind, Expr, ExprContext, ExprKind};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, ExceptHandler, Expr, ExprContext, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::call_path::compose_call_path;
-use ruff_python_ast::helpers::{create_expr, unparse_expr};
-use ruff_python_ast::types::Range;
-use ruff_python_semantic::context::Context;
+use ruff_python_semantic::SemanticModel;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for uses of exceptions that alias `OSError`.
+///
+/// ## Why is this bad?
+/// `OSError` is the builtin error type used for exceptions that relate to the
+/// operating system.
+///
+/// In Python 3.3, a variety of other exceptions, like `WindowsError` were
+/// aliased to `OSError`. These aliases remain in place for compatibility with
+/// older versions of Python, but may be removed in future versions.
+///
+/// Prefer using `OSError` directly, as it is more idiomatic and future-proof.
+///
+/// ## Example
+/// ```python
+/// raise IOError
+/// ```
+///
+/// Use instead:
+/// ```python
+/// raise OSError
+/// ```
+///
+/// ## References
+/// - [Python documentation: `OSError`](https://docs.python.org/3/library/exceptions.html#OSError)
 #[violation]
 pub struct OSErrorAlias {
     pub name: Option<String>,
@@ -30,124 +54,113 @@ impl AlwaysAutofixableViolation for OSErrorAlias {
     }
 }
 
-const ALIASES: &[(&str, &str)] = &[
-    ("", "EnvironmentError"),
-    ("", "IOError"),
-    ("", "WindowsError"),
-    ("mmap", "error"),
-    ("select", "error"),
-    ("socket", "error"),
-];
-
 /// Return `true` if an [`Expr`] is an alias of `OSError`.
-fn is_alias(context: &Context, expr: &Expr) -> bool {
-    context.resolve_call_path(expr).map_or(false, |call_path| {
-        ALIASES
-            .iter()
-            .any(|(module, member)| call_path.as_slice() == [*module, *member])
+fn is_alias(expr: &Expr, semantic: &SemanticModel) -> bool {
+    semantic.resolve_call_path(expr).map_or(false, |call_path| {
+        matches!(
+            call_path.as_slice(),
+            ["", "EnvironmentError" | "IOError" | "WindowsError"]
+                | ["mmap" | "select" | "socket", "error"]
+        )
     })
 }
 
 /// Return `true` if an [`Expr`] is `OSError`.
-fn is_os_error(context: &Context, expr: &Expr) -> bool {
-    context
-        .resolve_call_path(expr)
-        .map_or(false, |call_path| call_path.as_slice() == ["", "OSError"])
+fn is_os_error(expr: &Expr, semantic: &SemanticModel) -> bool {
+    semantic.resolve_call_path(expr).map_or(false, |call_path| {
+        matches!(call_path.as_slice(), ["", "OSError"])
+    })
 }
 
-/// Create a [`Diagnostic`] for a single target, like an [`ExprKind::Name`].
+/// Create a [`Diagnostic`] for a single target, like an [`Expr::Name`].
 fn atom_diagnostic(checker: &mut Checker, target: &Expr) {
     let mut diagnostic = Diagnostic::new(
         OSErrorAlias {
             name: compose_call_path(target),
         },
-        Range::from(target),
+        target.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            "OSError".to_string(),
-            target.location,
-            target.end_location.unwrap(),
-        ));
+        if checker.semantic().is_builtin("OSError") {
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                "OSError".to_string(),
+                target.range(),
+            )));
+        }
     }
     checker.diagnostics.push(diagnostic);
 }
 
 /// Create a [`Diagnostic`] for a tuple of expressions.
 fn tuple_diagnostic(checker: &mut Checker, target: &Expr, aliases: &[&Expr]) {
-    let mut diagnostic = Diagnostic::new(OSErrorAlias { name: None }, Range::from(target));
+    let mut diagnostic = Diagnostic::new(OSErrorAlias { name: None }, target.range());
     if checker.patch(diagnostic.kind.rule()) {
-        let ExprKind::Tuple { elts, ..} = &target.node else {
-            panic!("Expected ExprKind::Tuple");
-        };
+        if checker.semantic().is_builtin("OSError") {
+            let Expr::Tuple(ast::ExprTuple { elts, .. }) = target else {
+                panic!("Expected Expr::Tuple");
+            };
 
-        // Filter out any `OSErrors` aliases.
-        let mut remaining: Vec<Expr> = elts
-            .iter()
-            .filter_map(|elt| {
-                if aliases.contains(&elt) {
-                    None
-                } else {
-                    Some(elt.clone())
-                }
-            })
-            .collect();
+            // Filter out any `OSErrors` aliases.
+            let mut remaining: Vec<Expr> = elts
+                .iter()
+                .filter_map(|elt| {
+                    if aliases.contains(&elt) {
+                        None
+                    } else {
+                        Some(elt.clone())
+                    }
+                })
+                .collect();
 
-        // If `OSError` itself isn't already in the tuple, add it.
-        if elts.iter().all(|elt| !is_os_error(&checker.ctx, elt)) {
-            remaining.insert(
-                0,
-                create_expr(ExprKind::Name {
-                    id: "OSError".to_string(),
+            // If `OSError` itself isn't already in the tuple, add it.
+            if elts.iter().all(|elt| !is_os_error(elt, checker.semantic())) {
+                let node = ast::ExprName {
+                    id: "OSError".into(),
                     ctx: ExprContext::Load,
-                }),
-            );
-        }
+                    range: TextRange::default(),
+                };
+                remaining.insert(0, node.into());
+            }
 
-        if remaining.len() == 1 {
-            diagnostic.set_fix(Edit::replacement(
-                "OSError".to_string(),
-                target.location,
-                target.end_location.unwrap(),
-            ));
-        } else {
-            diagnostic.set_fix(Edit::replacement(
-                format!(
-                    "({})",
-                    unparse_expr(
-                        &create_expr(ExprKind::Tuple {
-                            elts: remaining,
-                            ctx: ExprContext::Load,
-                        }),
-                        checker.stylist,
-                    )
-                ),
-                target.location,
-                target.end_location.unwrap(),
-            ));
+            if remaining.len() == 1 {
+                diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                    "OSError".to_string(),
+                    target.range(),
+                )));
+            } else {
+                let node = ast::ExprTuple {
+                    elts: remaining,
+                    ctx: ExprContext::Load,
+                    range: TextRange::default(),
+                };
+                diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                    format!("({})", checker.generator().expr(&node.into())),
+                    target.range(),
+                )));
+            }
         }
     }
     checker.diagnostics.push(diagnostic);
 }
 
 /// UP024
-pub fn os_error_alias_handlers(checker: &mut Checker, handlers: &[Excepthandler]) {
+pub(crate) fn os_error_alias_handlers(checker: &mut Checker, handlers: &[ExceptHandler]) {
     for handler in handlers {
-        let ExcepthandlerKind::ExceptHandler { type_, .. } = &handler.node;
+        let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler { type_, .. }) = handler;
         let Some(expr) = type_.as_ref() else {
             continue;
         };
-        match &expr.node {
-            ExprKind::Name { .. } | ExprKind::Attribute { .. } => {
-                if is_alias(&checker.ctx, expr) {
+        match expr.as_ref() {
+            Expr::Name(_) | Expr::Attribute(_) => {
+                if is_alias(expr, checker.semantic()) {
                     atom_diagnostic(checker, expr);
                 }
             }
-            ExprKind::Tuple { elts, .. } => {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                 // List of aliases to replace with `OSError`.
                 let mut aliases: Vec<&Expr> = vec![];
                 for elt in elts {
-                    if is_alias(&checker.ctx, elt) {
+                    if is_alias(elt, checker.semantic()) {
                         aliases.push(elt);
                     }
                 }
@@ -161,19 +174,16 @@ pub fn os_error_alias_handlers(checker: &mut Checker, handlers: &[Excepthandler]
 }
 
 /// UP024
-pub fn os_error_alias_call(checker: &mut Checker, func: &Expr) {
-    if is_alias(&checker.ctx, func) {
+pub(crate) fn os_error_alias_call(checker: &mut Checker, func: &Expr) {
+    if is_alias(func, checker.semantic()) {
         atom_diagnostic(checker, func);
     }
 }
 
 /// UP024
-pub fn os_error_alias_raise(checker: &mut Checker, expr: &Expr) {
-    if matches!(
-        expr.node,
-        ExprKind::Name { .. } | ExprKind::Attribute { .. }
-    ) {
-        if is_alias(&checker.ctx, expr) {
+pub(crate) fn os_error_alias_raise(checker: &mut Checker, expr: &Expr) {
+    if matches!(expr, Expr::Name(_) | Expr::Attribute(_)) {
+        if is_alias(expr, checker.semantic()) {
             atom_diagnostic(checker, expr);
         }
     }

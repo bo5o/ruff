@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Stmt};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -35,7 +34,7 @@ impl Violation for UnintentionalTypeAnnotation {
 }
 
 /// B032
-pub fn unintentional_type_annotation(
+pub(crate) fn unintentional_type_annotation(
     checker: &mut Checker,
     target: &Expr,
     value: Option<&Expr>,
@@ -44,22 +43,20 @@ pub fn unintentional_type_annotation(
     if value.is_some() {
         return;
     }
-    match &target.node {
-        ExprKind::Subscript { value, .. } => {
-            if matches!(&value.node, ExprKind::Name { .. }) {
-                checker.diagnostics.push(Diagnostic::new(
-                    UnintentionalTypeAnnotation,
-                    Range::from(stmt),
-                ));
+    match target {
+        Expr::Subscript(ast::ExprSubscript { value, .. }) => {
+            if value.is_name_expr() {
+                checker
+                    .diagnostics
+                    .push(Diagnostic::new(UnintentionalTypeAnnotation, stmt.range()));
             }
         }
-        ExprKind::Attribute { value, .. } => {
-            if let ExprKind::Name { id, .. } = &value.node {
+        Expr::Attribute(ast::ExprAttribute { value, .. }) => {
+            if let Expr::Name(ast::ExprName { id, .. }) = value.as_ref() {
                 if id != "self" {
-                    checker.diagnostics.push(Diagnostic::new(
-                        UnintentionalTypeAnnotation,
-                        Range::from(stmt),
-                    ));
+                    checker
+                        .diagnostics
+                        .push(Diagnostic::new(UnintentionalTypeAnnotation, stmt.range()));
                 }
             }
         }

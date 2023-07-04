@@ -1,17 +1,19 @@
-use rustpython_parser::ast::Location;
+use ruff_text_size::{TextLen, TextRange, TextSize};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::helpers;
+use ruff_python_ast::source_code::{Indexer, Locator};
+use ruff_python_whitespace::Line;
 
 use crate::registry::Rule;
-use crate::settings::{flags, Settings};
+use crate::settings::Settings;
 
 /// ## What it does
 /// Checks for superfluous trailing whitespace.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, "avoid trailing whitespace anywhere. Because it’s usually
+/// According to [PEP 8], "avoid trailing whitespace anywhere. Because it’s usually
 /// invisible, it can be confusing"
 ///
 /// ## Example
@@ -24,8 +26,7 @@ use crate::settings::{flags, Settings};
 /// spam(1)\n#
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#other-recommendations)
+/// [PEP 8]: https://peps.python.org/pep-0008/#other-recommendations
 #[violation]
 pub struct TrailingWhitespace;
 
@@ -44,13 +45,12 @@ impl AlwaysAutofixableViolation for TrailingWhitespace {
 /// Checks for superfluous whitespace in blank lines.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, "avoid trailing whitespace anywhere. Because it’s usually
+/// According to [PEP 8], "avoid trailing whitespace anywhere. Because it’s usually
 /// invisible, it can be confusing"
 ///
 /// ## Example
 /// ```python
 /// class Foo(object):\n    \n    bang = 12
-///
 /// ```
 ///
 /// Use instead:
@@ -58,8 +58,7 @@ impl AlwaysAutofixableViolation for TrailingWhitespace {
 /// class Foo(object):\n\n    bang = 12
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#other-recommendations)
+/// [PEP 8]: https://peps.python.org/pep-0008/#other-recommendations
 #[violation]
 pub struct BlankLineWithWhitespace;
 
@@ -75,35 +74,39 @@ impl AlwaysAutofixableViolation for BlankLineWithWhitespace {
 }
 
 /// W291, W293
-pub fn trailing_whitespace(
-    lineno: usize,
-    line: &str,
+pub(crate) fn trailing_whitespace(
+    line: &Line,
+    locator: &Locator,
+    indexer: &Indexer,
     settings: &Settings,
-    autofix: flags::Autofix,
 ) -> Option<Diagnostic> {
-    let whitespace_count = line.chars().rev().take_while(|c| c.is_whitespace()).count();
-    if whitespace_count > 0 {
-        let line_char_count = line.chars().count();
-        let start = Location::new(lineno + 1, line_char_count - whitespace_count);
-        let end = Location::new(lineno + 1, line_char_count);
+    let whitespace_len: TextSize = line
+        .chars()
+        .rev()
+        .take_while(|c| c.is_whitespace())
+        .map(TextLen::text_len)
+        .sum();
+    if whitespace_len > TextSize::from(0) {
+        let range = TextRange::new(line.end() - whitespace_len, line.end());
 
-        if whitespace_count == line_char_count {
+        if range == line.range() {
             if settings.rules.enabled(Rule::BlankLineWithWhitespace) {
-                let mut diagnostic =
-                    Diagnostic::new(BlankLineWithWhitespace, Range::new(start, end));
-                if matches!(autofix, flags::Autofix::Enabled)
-                    && settings.rules.should_fix(Rule::BlankLineWithWhitespace)
-                {
-                    diagnostic.set_fix(Edit::deletion(start, end));
+                let mut diagnostic = Diagnostic::new(BlankLineWithWhitespace, range);
+                if settings.rules.should_fix(Rule::BlankLineWithWhitespace) {
+                    // Remove any preceding continuations, to avoid introducing a potential
+                    // syntax error.
+                    diagnostic.set_fix(Fix::automatic(Edit::range_deletion(TextRange::new(
+                        helpers::preceded_by_continuations(line.start(), locator, indexer)
+                            .unwrap_or(range.start()),
+                        range.end(),
+                    ))));
                 }
                 return Some(diagnostic);
             }
         } else if settings.rules.enabled(Rule::TrailingWhitespace) {
-            let mut diagnostic = Diagnostic::new(TrailingWhitespace, Range::new(start, end));
-            if matches!(autofix, flags::Autofix::Enabled)
-                && settings.rules.should_fix(Rule::TrailingWhitespace)
-            {
-                diagnostic.set_fix(Edit::deletion(start, end));
+            let mut diagnostic = Diagnostic::new(TrailingWhitespace, range);
+            if settings.rules.should_fix(Rule::TrailingWhitespace) {
+                diagnostic.set_fix(Fix::automatic(Edit::range_deletion(range)));
             }
             return Some(diagnostic);
         }

@@ -11,12 +11,14 @@ If left unspecified, Ruff's default configuration is equivalent to:
 
 ```toml
 [tool.ruff]
-# Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
+# Enable the pycodestyle (`E`) and Pyflakes (`F`) rules by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
 select = ["E", "F"]
 ignore = []
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.
-fixable = ["A", "B", "C", "D", "E", "F", "G", "I", "N", "Q", "S", "T", "W", "ANN", "ARG", "BLE", "COM", "DJ", "DTZ", "EM", "ERA", "EXE", "FBT", "ICN", "INP", "ISC", "NPY", "PD", "PGH", "PIE", "PL", "PT", "PTH", "PYI", "RET", "RSE", "RUF", "SIM", "SLF", "TCH", "TID", "TRY", "UP", "YTT"]
+fixable = ["ALL"]
 unfixable = []
 
 # Exclude a variety of commonly ignored directories.
@@ -25,6 +27,7 @@ exclude = [
     ".direnv",
     ".eggs",
     ".git",
+    ".git-rewrite",
     ".hg",
     ".mypy_cache",
     ".nox",
@@ -52,10 +55,6 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 # Assume Python 3.10.
 target-version = "py310"
-
-[tool.ruff.mccabe]
-# Unlike Flake8, default to a complexity level of 10.
-max-complexity = 10
 ```
 
 As an example, the following would configure Ruff to: (1) enforce flake8-bugbear rules, in addition
@@ -118,7 +117,8 @@ If you're wondering how to configure Ruff, here are some **recommended guideline
 ## Using `ruff.toml`
 
 As an alternative to `pyproject.toml`, Ruff will also respect a `ruff.toml` (or `.ruff.toml`) file,
-which implements an equivalent schema (though the `[tool.ruff]` hierarchy can be omitted).
+which implements an equivalent schema (though in the `ruff.toml` and `.ruff.toml` versions, the
+`[tool.ruff]` header is omitted).
 
 For example, the `pyproject.toml` described above would be represented via the following
 `ruff.toml` (or `.ruff.toml`):
@@ -201,7 +201,7 @@ Options:
       --show-fixes
           Show an enumeration of all autofixed lint violations
       --diff
-          Avoid writing any fixed files back; instead, output a diff for each changed file to stdout
+          Avoid writing any fixed files back; instead, output a diff for each changed file to stdout. Implies `--fix-only`
   -w, --watch
           Run in watch mode by re-running whenever files change
       --fix-only
@@ -209,9 +209,11 @@ Options:
       --ignore-noqa
           Ignore any `# noqa` comments
       --format <FORMAT>
-          Output serialization format for violations [env: RUFF_FORMAT=] [possible values: text, json, junit, grouped, github, gitlab, pylint, azure]
+          Output serialization format for violations [env: RUFF_FORMAT=] [possible values: text, json, json-lines, junit, grouped, github, gitlab, pylint, azure]
+  -o, --output-file <OUTPUT_FILE>
+          Specify file to write the linter output to (default: stdout)
       --target-version <TARGET_VERSION>
-          The minimum Python version that should be supported [possible values: py37, py38, py39, py310, py311]
+          The minimum Python version that should be supported [possible values: py37, py38, py39, py310, py311, py312]
       --config <CONFIG>
           Path to the `pyproject.toml` or `ruff.toml` file to use for configuration
       --statistics
@@ -231,13 +233,17 @@ Rule selection:
       --ignore <RULE_CODE>
           Comma-separated list of rule codes to disable
       --extend-select <RULE_CODE>
-          Like --select, but adds additional rule codes on top of the selected ones
+          Like --select, but adds additional rule codes on top of those already specified
       --per-file-ignores <PER_FILE_IGNORES>
           List of mappings from file pattern to code to exclude
+      --extend-per-file-ignores <EXTEND_PER_FILE_IGNORES>
+          Like `--per-file-ignores`, but adds additional ignores on top of those already specified
       --fixable <RULE_CODE>
           List of rule codes to treat as eligible for autofix. Only applicable when autofix itself is enabled (e.g., via `--fix`)
       --unfixable <RULE_CODE>
           List of rule codes to treat as ineligible for autofix. Only applicable when autofix itself is enabled (e.g., via `--fix`)
+      --extend-fixable <RULE_CODE>
+          Like --fixable, but adds additional rule codes on top of those already specified
 
 File selection:
       --exclude <FILE_PATTERN>         List of paths, used to omit files and/or directories from analysis
@@ -303,7 +309,7 @@ extend = "../pyproject.toml"
 line-length = 100
 ```
 
-All of the above rules apply equivalently to `ruff.toml` and `.ruff.toml`  files. If Ruff detects
+All of the above rules apply equivalently to `ruff.toml` and `.ruff.toml` files. If Ruff detects
 multiple configuration files in the same directory, the `.ruff.toml` file will take precedence over
 the `ruff.toml` file, and the `ruff.toml` file will take precedence over the `pyproject.toml` file.
 
@@ -319,6 +325,24 @@ By default, Ruff will also skip any files that are omitted via `.ignore`, `.giti
 
 Files that are passed to `ruff` directly are always linted, regardless of the above criteria.
 For example, `ruff check /path/to/excluded/file.py` will always lint `file.py`.
+
+## Jupyter Notebook discovery
+
+Ruff has built-in experimental support for linting [Jupyter Notebooks](https://jupyter.org/).
+
+To opt in to linting Jupyter Notebook (`.ipynb`) files, add the `*.ipynb` pattern to your
+[`include`](settings.md#include) setting, like so:
+
+```toml
+[tool.ruff]
+include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
+```
+
+This will prompt Ruff to discover Jupyter Notebook (`.ipynb`) files in any specified
+directories, and lint them accordingly.
+
+Alternatively, pass the notebook file(s) to `ruff` on the command-line directly. For example,
+`ruff check /path/to/notebook.ipynb` will always lint `notebook.ipynb`.
 
 ## Rule selection
 
@@ -437,7 +461,8 @@ By default, Ruff exits with the following status codes:
 
 - `0` if no violations were found, or if all present violations were fixed automatically.
 - `1` if violations were found.
-- `2` if Ruff terminates abnormally due to invalid configuration, invalid CLI options, or an internal error.
+- `2` if Ruff terminates abnormally due to invalid configuration, invalid CLI options, or an
+  internal error.
 
 This convention mirrors that of tools like ESLint, Prettier, and RuboCop.
 

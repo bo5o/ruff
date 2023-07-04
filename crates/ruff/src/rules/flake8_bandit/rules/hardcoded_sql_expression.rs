@@ -1,18 +1,17 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rustpython_parser::ast::{Expr, ExprKind, Operator};
+use rustpython_parser::ast::{self, Expr, Operator, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::{any_over_expr, unparse_expr};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::helpers::any_over_expr;
 
 use crate::checkers::ast::Checker;
 
 use super::super::helpers::string_literal;
 
 static SQL_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(select\s.*from\s|delete\s+from\s|insert\s+into\s.*values\s|update\s.*set\s)")
+    Regex::new(r"(?i)\b(select\s.+\sfrom\s|delete\s+from\s|(insert|replace)\s.+\svalues\s|update\s.+\sset\s)")
         .unwrap()
 });
 
@@ -54,51 +53,51 @@ fn matches_sql_statement(string: &str) -> bool {
 }
 
 fn unparse_string_format_expression(checker: &mut Checker, expr: &Expr) -> Option<String> {
-    match &expr.node {
+    match expr {
         // "select * from table where val = " + "str" + ...
         // "select * from table where val = %s" % ...
-        ExprKind::BinOp {
+        Expr::BinOp(ast::ExprBinOp {
             op: Operator::Add | Operator::Mod,
             ..
-        } => {
-            let Some(parent) = checker.ctx.current_expr_parent() else {
+        }) => {
+            let Some(parent) = checker.semantic().expr_parent() else {
                 if any_over_expr(expr, &has_string_literal) {
-                    return Some(unparse_expr(expr, checker.stylist));
+                    return Some(checker.generator().expr(expr));
                 }
                 return None;
             };
             // Only evaluate the full BinOp, not the nested components.
-            let ExprKind::BinOp { .. } = &parent.node else {
+            let Expr::BinOp(_) = parent else {
                 if any_over_expr(expr, &has_string_literal) {
-                    return Some(unparse_expr(expr, checker.stylist));
+                    return Some(checker.generator().expr(expr));
                 }
                 return None;
             };
             None
         }
-        ExprKind::Call { func, .. } => {
-            let ExprKind::Attribute{ attr, value, .. } = &func.node else {
+        Expr::Call(ast::ExprCall { func, .. }) => {
+            let Expr::Attribute(ast::ExprAttribute { attr, value, .. }) = func.as_ref() else {
                 return None;
             };
             // "select * from table where val = {}".format(...)
             if attr == "format" && string_literal(value).is_some() {
-                return Some(unparse_expr(expr, checker.stylist));
+                return Some(checker.generator().expr(expr));
             };
             None
         }
         // f"select * from table where val = {val}"
-        ExprKind::JoinedStr { .. } => Some(unparse_expr(expr, checker.stylist)),
+        Expr::JoinedStr(_) => Some(checker.generator().expr(expr)),
         _ => None,
     }
 }
 
 /// S608
-pub fn hardcoded_sql_expression(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn hardcoded_sql_expression(checker: &mut Checker, expr: &Expr) {
     match unparse_string_format_expression(checker, expr) {
         Some(string) if matches_sql_statement(&string) => {
             checker
                 .diagnostics
-                .push(Diagnostic::new(HardcodedSQLExpression, Range::from(expr)));
+                .push(Diagnostic::new(HardcodedSQLExpression, expr.range()));
         }
         _ => (),
     }

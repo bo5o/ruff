@@ -25,13 +25,13 @@ enum State {
 }
 
 #[derive(Default)]
-pub struct StateMachine {
+pub(crate) struct StateMachine {
     state: State,
     bracket_count: usize,
 }
 
 impl StateMachine {
-    pub fn consume(&mut self, tok: &Tok) -> bool {
+    pub(crate) fn consume(&mut self, tok: &Tok) -> bool {
         match tok {
             Tok::NonLogicalNewline
             | Tok::Newline
@@ -79,7 +79,7 @@ impl StateMachine {
             }
 
             Tok::Lpar | Tok::Lbrace | Tok::Lsqb => {
-                self.bracket_count += 1;
+                self.bracket_count = self.bracket_count.saturating_add(1);
                 if matches!(
                     self.state,
                     State::ExpectModuleDocstring
@@ -92,7 +92,7 @@ impl StateMachine {
             }
 
             Tok::Rpar | Tok::Rbrace | Tok::Rsqb => {
-                self.bracket_count -= 1;
+                self.bracket_count = self.bracket_count.saturating_sub(1);
                 if matches!(
                     self.state,
                     State::ExpectModuleDocstring

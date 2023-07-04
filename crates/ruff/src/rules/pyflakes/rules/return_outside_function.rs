@@ -1,12 +1,26 @@
-use rustpython_parser::ast::Stmt;
+use rustpython_parser::ast::{Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
-use ruff_python_semantic::scope::ScopeKind;
+use ruff_python_semantic::ScopeKind;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for `return` statements outside of functions.
+///
+/// ## Why is this bad?
+/// The use of a `return` statement outside of a function will raise a
+/// `SyntaxError`.
+///
+/// ## Example
+/// ```python
+/// class Foo:
+///     return 1
+/// ```
+///
+/// ## References
+/// - [Python documentation: `return`](https://docs.python.org/3/reference/simple_stmts.html#the-return-statement)
 #[violation]
 pub struct ReturnOutsideFunction;
 
@@ -17,15 +31,13 @@ impl Violation for ReturnOutsideFunction {
     }
 }
 
-pub fn return_outside_function(checker: &mut Checker, stmt: &Stmt) {
-    if let Some(index) = checker.ctx.scope_stack.top() {
-        if matches!(
-            checker.ctx.scopes[index].kind,
-            ScopeKind::Class(_) | ScopeKind::Module
-        ) {
-            checker
-                .diagnostics
-                .push(Diagnostic::new(ReturnOutsideFunction, Range::from(stmt)));
-        }
+pub(crate) fn return_outside_function(checker: &mut Checker, stmt: &Stmt) {
+    if matches!(
+        checker.semantic().scope().kind,
+        ScopeKind::Class(_) | ScopeKind::Module
+    ) {
+        checker
+            .diagnostics
+            .push(Diagnostic::new(ReturnOutsideFunction, stmt.range()));
     }
 }

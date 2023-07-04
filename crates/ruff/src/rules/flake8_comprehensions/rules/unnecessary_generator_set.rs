@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -43,26 +42,27 @@ impl AlwaysAutofixableViolation for UnnecessaryGeneratorSet {
 }
 
 /// C401 (`set(generator)`)
-pub fn unnecessary_generator_set(
+pub(crate) fn unnecessary_generator_set(
     checker: &mut Checker,
     expr: &Expr,
-    parent: Option<&Expr>,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("set", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("set", func, args, keywords)
+    else {
         return;
     };
-    if !checker.ctx.is_builtin("set") {
+    if !checker.semantic().is_builtin("set") {
         return;
     }
-    if let ExprKind::GeneratorExp { .. } = argument {
-        let mut diagnostic = Diagnostic::new(UnnecessaryGeneratorSet, Range::from(expr));
+    if let Expr::GeneratorExp(_) = argument {
+        let mut diagnostic = Diagnostic::new(UnnecessaryGeneratorSet, expr.range());
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.try_set_fix(|| {
-                fixes::fix_unnecessary_generator_set(checker.locator, checker.stylist, expr, parent)
-            });
+            #[allow(deprecated)]
+            diagnostic
+                .try_set_fix_from_edit(|| fixes::fix_unnecessary_generator_set(checker, expr));
         }
         checker.diagnostics.push(diagnostic);
     }

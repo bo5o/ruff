@@ -1,8 +1,8 @@
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Expr, Ranged};
 
+use crate::checkers::ast::Checker;
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 #[violation]
 pub struct PandasUseOfPdMerge;
@@ -18,13 +18,14 @@ impl Violation for PandasUseOfPdMerge {
 }
 
 /// PD015
-pub fn use_of_pd_merge(func: &Expr) -> Option<Diagnostic> {
-    if let ExprKind::Attribute { attr, value, .. } = &func.node {
-        if let ExprKind::Name { id, .. } = &value.node {
+pub(crate) fn use_of_pd_merge(checker: &mut Checker, func: &Expr) {
+    if let Expr::Attribute(ast::ExprAttribute { attr, value, .. }) = func {
+        if let Expr::Name(ast::ExprName { id, .. }) = value.as_ref() {
             if id == "pd" && attr == "merge" {
-                return Some(Diagnostic::new(PandasUseOfPdMerge, Range::from(func)));
+                checker
+                    .diagnostics
+                    .push(Diagnostic::new(PandasUseOfPdMerge, func.range()));
             }
         }
     }
-    None
 }

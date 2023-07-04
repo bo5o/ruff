@@ -1,9 +1,8 @@
-use rustpython_parser::ast::Constant::Bool;
-use rustpython_parser::ast::{Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::helpers::is_const_true;
 
 use crate::checkers::ast::Checker;
 
@@ -41,7 +40,7 @@ use super::helpers;
 /// ```
 #[violation]
 pub struct DjangoNullableModelStringField {
-    pub field_name: String,
+    field_name: String,
 }
 
 impl Violation for DjangoNullableModelStringField {
@@ -52,44 +51,36 @@ impl Violation for DjangoNullableModelStringField {
     }
 }
 
-const NOT_NULL_TRUE_FIELDS: [&str; 6] = [
-    "CharField",
-    "TextField",
-    "SlugField",
-    "EmailField",
-    "FilePathField",
-    "URLField",
-];
-
 /// DJ001
-pub fn nullable_model_string_field(checker: &Checker, body: &[Stmt]) -> Vec<Diagnostic> {
-    let mut errors = Vec::new();
+pub(crate) fn nullable_model_string_field(checker: &mut Checker, body: &[Stmt]) {
     for statement in body.iter() {
-        let StmtKind::Assign {value, ..} = &statement.node else {
-            continue
+        let Stmt::Assign(ast::StmtAssign { value, .. }) = statement else {
+            continue;
         };
         if let Some(field_name) = is_nullable_field(checker, value) {
-            errors.push(Diagnostic::new(
+            checker.diagnostics.push(Diagnostic::new(
                 DjangoNullableModelStringField {
                     field_name: field_name.to_string(),
                 },
-                Range::from(value),
+                value.range(),
             ));
         }
     }
-    errors
 }
 
 fn is_nullable_field<'a>(checker: &'a Checker, value: &'a Expr) -> Option<&'a str> {
-    let ExprKind::Call {func, keywords, ..} = &value.node else {
+    let Expr::Call(ast::ExprCall { func, keywords, .. }) = value else {
         return None;
     };
 
-    let Some(valid_field_name) = helpers::get_model_field_name(&checker.ctx, func) else {
+    let Some(valid_field_name) = helpers::get_model_field_name(func, checker.semantic()) else {
         return None;
     };
 
-    if !NOT_NULL_TRUE_FIELDS.contains(&valid_field_name) {
+    if !matches!(
+        valid_field_name,
+        "CharField" | "TextField" | "SlugField" | "EmailField" | "FilePathField" | "URLField"
+    ) {
         return None;
     }
 
@@ -97,12 +88,12 @@ fn is_nullable_field<'a>(checker: &'a Checker, value: &'a Expr) -> Option<&'a st
     let mut blank_key = false;
     let mut unique_key = false;
     for keyword in keywords.iter() {
-        let ExprKind::Constant {value: Bool(true), ..} = &keyword.node.value.node else {
-            continue
+        let Some(argument) = &keyword.arg else {
+            continue;
         };
-        let Some(argument) = &keyword.node.arg else {
-            continue
-        };
+        if !is_const_true(&keyword.value) {
+            continue;
+        }
         match argument.as_str() {
             "blank" => blank_key = true,
             "null" => null_key = true,

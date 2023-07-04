@@ -1,17 +1,43 @@
 use rustc_hash::FxHashMap;
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, ArgWithDefault, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for loop control variables that override the loop iterable.
+///
+/// ## Why is this bad?
+/// Loop control variables should not override the loop iterable, as this can
+/// lead to confusing behavior.
+///
+/// Instead, use a distinct variable name for any loop control variables.
+///
+/// ## Example
+/// ```python
+/// items = [1, 2, 3]
+///
+/// for items in items:
+///     print(items)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// items = [1, 2, 3]
+///
+/// for item in items:
+///     print(item)
+/// ```
+///
+/// ## References
+/// - [Python documentation: The `for` statement](https://docs.python.org/3/reference/compound_stmts.html#the-for-statement)
 #[violation]
 pub struct LoopVariableOverridesIterator {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for LoopVariableOverridesIterator {
@@ -32,22 +58,35 @@ where
     'b: 'a,
 {
     fn visit_expr(&mut self, expr: &'b Expr) {
-        match &expr.node {
-            ExprKind::Name { id, .. } => {
+        match expr {
+            Expr::Name(ast::ExprName { id, .. }) => {
                 self.names.insert(id, expr);
             }
-            ExprKind::ListComp { generators, .. }
-            | ExprKind::DictComp { generators, .. }
-            | ExprKind::SetComp { generators, .. }
-            | ExprKind::GeneratorExp { generators, .. } => {
+            Expr::ListComp(ast::ExprListComp { generators, .. })
+            | Expr::DictComp(ast::ExprDictComp { generators, .. })
+            | Expr::SetComp(ast::ExprSetComp { generators, .. })
+            | Expr::GeneratorExp(ast::ExprGeneratorExp { generators, .. }) => {
                 for comp in generators {
                     self.visit_expr(&comp.iter);
                 }
             }
-            ExprKind::Lambda { args, body } => {
+            Expr::Lambda(ast::ExprLambda {
+                args,
+                body,
+                range: _,
+            }) => {
                 visitor::walk_expr(self, body);
-                for arg in &args.args {
-                    self.names.remove(arg.node.arg.as_str());
+                for ArgWithDefault {
+                    def,
+                    default: _,
+                    range: _,
+                } in args
+                    .posonlyargs
+                    .iter()
+                    .chain(&args.args)
+                    .chain(&args.kwonlyargs)
+                {
+                    self.names.remove(def.arg.as_str());
                 }
             }
             _ => visitor::walk_expr(self, expr),
@@ -56,7 +95,7 @@ where
 }
 
 /// B020
-pub fn loop_variable_overrides_iterator(checker: &mut Checker, target: &Expr, iter: &Expr) {
+pub(crate) fn loop_variable_overrides_iterator(checker: &mut Checker, target: &Expr, iter: &Expr) {
     let target_names = {
         let mut target_finder = NameFinder::default();
         target_finder.visit_expr(target);
@@ -74,7 +113,7 @@ pub fn loop_variable_overrides_iterator(checker: &mut Checker, target: &Expr, it
                 LoopVariableOverridesIterator {
                     name: name.to_string(),
                 },
-                Range::from(expr),
+                expr.range(),
             ));
         }
     }

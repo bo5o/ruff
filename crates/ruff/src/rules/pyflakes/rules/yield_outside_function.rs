@@ -1,16 +1,15 @@
 use std::fmt;
 
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
-use ruff_python_semantic::scope::ScopeKind;
+use ruff_python_semantic::ScopeKind;
 
 use crate::checkers::ast::Checker;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum DeferralKeyword {
+enum DeferralKeyword {
     Yield,
     YieldFrom,
     Await,
@@ -26,9 +25,24 @@ impl fmt::Display for DeferralKeyword {
     }
 }
 
+/// ## What it does
+/// Checks for `yield` and `yield from` statements outside of functions.
+///
+/// ## Why is this bad?
+/// The use of a `yield` or `yield from` statement outside of a function will
+/// raise a `SyntaxError`.
+///
+/// ## Example
+/// ```python
+/// class Foo:
+///     yield 1
+/// ```
+///
+/// ## References
+/// - [Python documentation: `yield`](https://docs.python.org/3/reference/simple_stmts.html#the-yield-statement)
 #[violation]
 pub struct YieldOutsideFunction {
-    pub keyword: DeferralKeyword,
+    keyword: DeferralKeyword,
 }
 
 impl Violation for YieldOutsideFunction {
@@ -39,20 +53,20 @@ impl Violation for YieldOutsideFunction {
     }
 }
 
-pub fn yield_outside_function(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn yield_outside_function(checker: &mut Checker, expr: &Expr) {
     if matches!(
-        checker.ctx.scope().kind,
+        checker.semantic().scope().kind,
         ScopeKind::Class(_) | ScopeKind::Module
     ) {
-        let keyword = match expr.node {
-            ExprKind::Yield { .. } => DeferralKeyword::Yield,
-            ExprKind::YieldFrom { .. } => DeferralKeyword::YieldFrom,
-            ExprKind::Await { .. } => DeferralKeyword::Await,
-            _ => panic!("Expected ExprKind::Yield | ExprKind::YieldFrom | ExprKind::Await"),
+        let keyword = match expr {
+            Expr::Yield(_) => DeferralKeyword::Yield,
+            Expr::YieldFrom(_) => DeferralKeyword::YieldFrom,
+            Expr::Await(_) => DeferralKeyword::Await,
+            _ => panic!("Expected Expr::Yield | Expr::YieldFrom | Expr::Await"),
         };
         checker.diagnostics.push(Diagnostic::new(
             YieldOutsideFunction { keyword },
-            Range::from(expr),
+            expr.range(),
         ));
     }
 }

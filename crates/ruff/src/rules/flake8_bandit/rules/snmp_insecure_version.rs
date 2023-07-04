@@ -1,10 +1,9 @@
 use num_traits::{One, Zero};
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::helpers::SimpleCallArgs;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -19,31 +18,30 @@ impl Violation for SnmpInsecureVersion {
 }
 
 /// S508
-pub fn snmp_insecure_version(
+pub(crate) fn snmp_insecure_version(
     checker: &mut Checker,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
     if checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["pysnmp", "hlapi", "CommunityData"]
+            matches!(call_path.as_slice(), ["pysnmp", "hlapi", "CommunityData"])
         })
     {
         let call_args = SimpleCallArgs::new(args, keywords);
         if let Some(mp_model_arg) = call_args.keyword_argument("mpModel") {
-            if let ExprKind::Constant {
+            if let Expr::Constant(ast::ExprConstant {
                 value: Constant::Int(value),
                 ..
-            } = &mp_model_arg.node
+            }) = &mp_model_arg
             {
                 if value.is_zero() || value.is_one() {
-                    checker.diagnostics.push(Diagnostic::new(
-                        SnmpInsecureVersion,
-                        Range::from(mp_model_arg),
-                    ));
+                    checker
+                        .diagnostics
+                        .push(Diagnostic::new(SnmpInsecureVersion, mp_model_arg.range()));
                 }
             }
         }

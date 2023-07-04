@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Comprehension, Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Comprehension, Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::visitor::{self, Visitor};
 
 use crate::checkers::ast::Checker;
@@ -11,7 +10,7 @@ use crate::checkers::ast::Checker;
 /// Checks for multiple usage of the generator returned from
 /// `itertools.groupby()`.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// Using the generator more than once will do nothing on the second usage.
 /// If that data is needed later, it should be stored as a list.
 ///
@@ -85,10 +84,22 @@ impl<'a> GroupNameFinder<'a> {
     }
 
     fn name_matches(&self, expr: &Expr) -> bool {
-        if let ExprKind::Name { id, .. } = &expr.node {
+        if let Expr::Name(ast::ExprName { id, .. }) = expr {
             id == self.group_name
         } else {
             false
+        }
+    }
+
+    /// Increment the usage count for the group name by the given value.
+    /// If we're in one of the branches of a mutually exclusive statement,
+    /// then increment the count for that branch. Otherwise, increment the
+    /// global count.
+    fn increment_usage_count(&mut self, value: u32) {
+        if let Some(last) = self.counter_stack.last_mut() {
+            *last.last_mut().unwrap() += value;
+        } else {
+            self.usage_count += value;
         }
     }
 }
@@ -101,15 +112,15 @@ where
         if self.overridden {
             return;
         }
-        match &stmt.node {
-            StmtKind::For {
+        match stmt {
+            Stmt::For(ast::StmtFor {
                 target, iter, body, ..
-            } => {
+            }) => {
                 if self.name_matches(target) {
                     self.overridden = true;
                 } else {
                     if self.name_matches(iter) {
-                        self.usage_count += 1;
+                        self.increment_usage_count(1);
                         // This could happen when the group is being looped
                         // over multiple times:
                         //      for item in group:
@@ -127,15 +138,20 @@ where
                     self.nested = false;
                 }
             }
-            StmtKind::While { body, .. } => {
+            Stmt::While(ast::StmtWhile { body, .. }) => {
                 self.nested = true;
                 visitor::walk_body(self, body);
                 self.nested = false;
             }
-            StmtKind::If { test, body, orelse } => {
+            Stmt::If(ast::StmtIf {
+                test,
+                body,
+                orelse,
+                range: _,
+            }) => {
                 // Determine whether we're on an `if` arm (as opposed to an `elif`).
                 let is_if_arm = !self.parent_ifs.iter().any(|parent| {
-                    if let StmtKind::If { orelse, .. } = &parent.node {
+                    if let Stmt::If(ast::StmtIf { orelse, .. }) = parent {
                         orelse.len() == 1 && &orelse[0] == stmt
                     } else {
                         false
@@ -155,12 +171,12 @@ where
 
                 let has_else = orelse
                     .first()
-                    .map_or(false, |expr| !matches!(expr.node, StmtKind::If { .. }));
+                    .map_or(false, |expr| !matches!(expr, Stmt::If(_)));
 
                 self.parent_ifs.push(stmt);
                 if has_else {
-                    // There's no `StmtKind::Else`; instead, the `else` contents are directly on
-                    // the `orelse` of the `StmtKind::If` node. We want to add a new counter for
+                    // There's no `Stmt::Else`; instead, the `else` contents are directly on
+                    // the `orelse` of the `Stmt::If` node. We want to add a new counter for
                     // the `orelse` branch, but first, we need to visit the `if` body manually.
                     self.visit_expr(test);
                     self.visit_body(body);
@@ -178,15 +194,15 @@ where
                         // This is the max number of group usage from all the
                         // branches of this `if` statement.
                         let max_count = last.into_iter().max().unwrap_or(0);
-                        if let Some(current_last) = self.counter_stack.last_mut() {
-                            *current_last.last_mut().unwrap() += max_count;
-                        } else {
-                            self.usage_count += max_count;
-                        }
+                        self.increment_usage_count(max_count);
                     }
                 }
             }
-            StmtKind::Match { subject, cases } => {
+            Stmt::Match(ast::StmtMatch {
+                subject,
+                cases,
+                range: _,
+            }) => {
                 self.counter_stack.push(Vec::with_capacity(cases.len()));
                 self.visit_expr(subject);
                 for match_case in cases {
@@ -197,21 +213,17 @@ where
                     // This is the max number of group usage from all the
                     // branches of this `match` statement.
                     let max_count = last.into_iter().max().unwrap_or(0);
-                    if let Some(current_last) = self.counter_stack.last_mut() {
-                        *current_last.last_mut().unwrap() += max_count;
-                    } else {
-                        self.usage_count += max_count;
-                    }
+                    self.increment_usage_count(max_count);
                 }
             }
-            StmtKind::Assign { targets, value, .. } => {
+            Stmt::Assign(ast::StmtAssign { targets, value, .. }) => {
                 if targets.iter().any(|target| self.name_matches(target)) {
                     self.overridden = true;
                 } else {
                     self.visit_expr(value);
                 }
             }
-            StmtKind::AnnAssign { target, value, .. } => {
+            Stmt::AnnAssign(ast::StmtAnnAssign { target, value, .. }) => {
                 if self.name_matches(target) {
                     self.overridden = true;
                 } else if let Some(expr) = value {
@@ -230,7 +242,7 @@ where
             return;
         }
         if self.name_matches(&comprehension.iter) {
-            self.usage_count += 1;
+            self.increment_usage_count(1);
             if self.usage_count > 1 {
                 self.exprs.push(&comprehension.iter);
             }
@@ -238,7 +250,7 @@ where
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
-        if let ExprKind::NamedExpr { target, .. } = &expr.node {
+        if let Expr::NamedExpr(ast::ExprNamedExpr { target, .. }) = expr {
             if self.name_matches(target) {
                 self.overridden = true;
             }
@@ -247,8 +259,17 @@ where
             return;
         }
 
-        match &expr.node {
-            ExprKind::ListComp { elt, generators } | ExprKind::SetComp { elt, generators } => {
+        match expr {
+            Expr::ListComp(ast::ExprListComp {
+                elt,
+                generators,
+                range: _,
+            })
+            | Expr::SetComp(ast::ExprSetComp {
+                elt,
+                generators,
+                range: _,
+            }) => {
                 for comprehension in generators {
                     self.visit_comprehension(comprehension);
                 }
@@ -258,11 +279,12 @@ where
                     self.nested = false;
                 }
             }
-            ExprKind::DictComp {
+            Expr::DictComp(ast::ExprDictComp {
                 key,
                 value,
                 generators,
-            } => {
+                range: _,
+            }) => {
                 for comprehension in generators {
                     self.visit_comprehension(comprehension);
                 }
@@ -275,14 +297,7 @@ where
             }
             _ => {
                 if self.name_matches(expr) {
-                    // If the stack isn't empty, then we're in one of the branches of
-                    // a mutually exclusive statement. Otherwise, we'll add it to the
-                    // global count.
-                    if let Some(last) = self.counter_stack.last_mut() {
-                        *last.last_mut().unwrap() += 1;
-                    } else {
-                        self.usage_count += 1;
-                    }
+                    self.increment_usage_count(1);
 
                     let current_usage_count = self.usage_count
                         + self
@@ -305,16 +320,16 @@ where
 }
 
 /// B031
-pub fn reuse_of_groupby_generator(
+pub(crate) fn reuse_of_groupby_generator(
     checker: &mut Checker,
     target: &Expr,
     body: &[Stmt],
     iter: &Expr,
 ) {
-    let ExprKind::Call { func, .. } = &iter.node else {
+    let Expr::Call(ast::ExprCall { func, .. }) = &iter else {
         return;
     };
-    let ExprKind::Tuple { elts, .. } = &target.node else {
+    let Expr::Tuple(ast::ExprTuple { elts, .. }) = target else {
         // Ignore any `groupby()` invocation that isn't unpacked
         return;
     };
@@ -322,15 +337,15 @@ pub fn reuse_of_groupby_generator(
         return;
     }
     // We have an invocation of groupby which is a simple unpacking
-    let ExprKind::Name { id: group_name, .. } = &elts[1].node else {
+    let Expr::Name(ast::ExprName { id: group_name, .. }) = &elts[1] else {
         return;
     };
     // Check if the function call is `itertools.groupby`
     if !checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["itertools", "groupby"]
+            matches!(call_path.as_slice(), ["itertools", "groupby"])
         })
     {
         return;
@@ -342,6 +357,6 @@ pub fn reuse_of_groupby_generator(
     for expr in finder.exprs {
         checker
             .diagnostics
-            .push(Diagnostic::new(ReuseOfGroupbyGenerator, Range::from(expr)));
+            .push(Diagnostic::new(ReuseOfGroupbyGenerator, expr.range()));
     }
 }

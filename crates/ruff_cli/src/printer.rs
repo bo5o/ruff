@@ -1,8 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::io;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 
 use anyhow::Result;
 use bitflags::bitflags;
@@ -16,7 +15,7 @@ use ruff::linter::FixTable;
 use ruff::logging::LogLevel;
 use ruff::message::{
     AzureEmitter, Emitter, EmitterContext, GithubEmitter, GitlabEmitter, GroupedEmitter,
-    JsonEmitter, JunitEmitter, PylintEmitter, TextEmitter,
+    JsonEmitter, JsonLinesEmitter, JunitEmitter, PylintEmitter, TextEmitter,
 };
 use ruff::notify_user;
 use ruff::registry::{AsRule, Rule};
@@ -26,10 +25,16 @@ use ruff::settings::types::SerializationFormat;
 use crate::diagnostics::Diagnostics;
 
 bitflags! {
-    #[derive(Default)]
+    #[derive(Default, Debug, Copy, Clone)]
     pub(crate) struct Flags: u8 {
+        /// Whether to show violations when emitting diagnostics.
         const SHOW_VIOLATIONS = 0b0000_0001;
-        const SHOW_FIXES = 0b0000_0010;
+        /// Whether to show the source code when emitting diagnostics.
+        const SHOW_SOURCE = 0b000_0010;
+        /// Whether to show a summary of the fixed violations when emitting diagnostics.
+        const SHOW_FIX_SUMMARY = 0b0000_0100;
+        /// Whether to show a diff of each fixed violation when emitting diagnostics.
+        const SHOW_FIX_DIFF = 0b0000_1000;
     }
 }
 
@@ -72,7 +77,7 @@ pub(crate) struct Printer {
 }
 
 impl Printer {
-    pub const fn new(
+    pub(crate) const fn new(
         format: SerializationFormat,
         log_level: LogLevel,
         autofix_level: flags::FixMode,
@@ -86,13 +91,13 @@ impl Printer {
         }
     }
 
-    pub fn write_to_user(&self, message: &str) {
+    pub(crate) fn write_to_user(&self, message: &str) {
         if self.log_level >= LogLevel::Default {
             notify_user!("{}", message);
         }
     }
 
-    fn write_summary_text(&self, stdout: &mut dyn Write, diagnostics: &Diagnostics) -> Result<()> {
+    fn write_summary_text(&self, writer: &mut dyn Write, diagnostics: &Diagnostics) -> Result<()> {
         if self.log_level >= LogLevel::Default {
             if self.flags.contains(Flags::SHOW_VIOLATIONS) {
                 let fixed = diagnostics
@@ -105,23 +110,23 @@ impl Printer {
                 if fixed > 0 {
                     let s = if total == 1 { "" } else { "s" };
                     writeln!(
-                        stdout,
+                        writer,
                         "Found {total} error{s} ({fixed} fixed, {remaining} remaining)."
                     )?;
                 } else if remaining > 0 {
                     let s = if remaining == 1 { "" } else { "s" };
-                    writeln!(stdout, "Found {remaining} error{s}.")?;
+                    writeln!(writer, "Found {remaining} error{s}.")?;
                 }
 
                 if show_fix_status(self.autofix_level) {
                     let num_fixable = diagnostics
                         .messages
                         .iter()
-                        .filter(|message| message.kind.fixable)
+                        .filter(|message| message.fix.is_some())
                         .count();
                     if num_fixable > 0 {
                         writeln!(
-                            stdout,
+                            writer,
                             "[{}] {num_fixable} potentially fixable with the --fix option.",
                             "*".cyan(),
                         )?;
@@ -135,10 +140,10 @@ impl Printer {
                     .sum::<usize>();
                 if fixed > 0 {
                     let s = if fixed == 1 { "" } else { "s" };
-                    if matches!(self.autofix_level, flags::FixMode::Apply) {
-                        writeln!(stdout, "Fixed {fixed} error{s}.")?;
-                    } else if matches!(self.autofix_level, flags::FixMode::Diff) {
-                        writeln!(stdout, "Would fix {fixed} error{s}.")?;
+                    if self.autofix_level.is_apply() {
+                        writeln!(writer, "Fixed {fixed} error{s}.")?;
+                    } else {
+                        writeln!(writer, "Would fix {fixed} error{s}.")?;
                     }
                 }
             }
@@ -146,7 +151,11 @@ impl Printer {
         Ok(())
     }
 
-    pub fn write_once(&self, diagnostics: &Diagnostics, writer: &mut impl Write) -> Result<()> {
+    pub(crate) fn write_once(
+        &self,
+        diagnostics: &Diagnostics,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
         if matches!(self.log_level, LogLevel::Silent) {
             return Ok(());
         }
@@ -156,10 +165,10 @@ impl Printer {
                 self.format,
                 SerializationFormat::Text | SerializationFormat::Grouped
             ) {
-                if self.flags.contains(Flags::SHOW_FIXES) {
+                if self.flags.contains(Flags::SHOW_FIX_SUMMARY) {
                     if !diagnostics.fixed.is_empty() {
                         writeln!(writer)?;
-                        print_fixed(writer, &diagnostics.fixed)?;
+                        print_fix_summary(writer, &diagnostics.fixed)?;
                         writeln!(writer)?;
                     }
                 }
@@ -168,11 +177,14 @@ impl Printer {
             return Ok(());
         }
 
-        let context = EmitterContext::new(&diagnostics.jupyter_index);
+        let context = EmitterContext::new(&diagnostics.source_kind);
 
         match self.format {
             SerializationFormat::Json => {
                 JsonEmitter::default().emit(writer, &diagnostics.messages, &context)?;
+            }
+            SerializationFormat::JsonLines => {
+                JsonLinesEmitter::default().emit(writer, &diagnostics.messages, &context)?;
             }
             SerializationFormat::Junit => {
                 JunitEmitter::default().emit(writer, &diagnostics.messages, &context)?;
@@ -180,12 +192,14 @@ impl Printer {
             SerializationFormat::Text => {
                 TextEmitter::default()
                     .with_show_fix_status(show_fix_status(self.autofix_level))
+                    .with_show_fix_diff(self.flags.contains(Flags::SHOW_FIX_DIFF))
+                    .with_show_source(self.flags.contains(Flags::SHOW_SOURCE))
                     .emit(writer, &diagnostics.messages, &context)?;
 
-                if self.flags.contains(Flags::SHOW_FIXES) {
+                if self.flags.contains(Flags::SHOW_FIX_SUMMARY) {
                     if !diagnostics.fixed.is_empty() {
                         writeln!(writer)?;
-                        print_fixed(writer, &diagnostics.fixed)?;
+                        print_fix_summary(writer, &diagnostics.fixed)?;
                         writeln!(writer)?;
                     }
                 }
@@ -194,13 +208,14 @@ impl Printer {
             }
             SerializationFormat::Grouped => {
                 GroupedEmitter::default()
+                    .with_show_source(self.flags.contains(Flags::SHOW_SOURCE))
                     .with_show_fix_status(show_fix_status(self.autofix_level))
                     .emit(writer, &diagnostics.messages, &context)?;
 
-                if self.flags.contains(Flags::SHOW_FIXES) {
+                if self.flags.contains(Flags::SHOW_FIX_SUMMARY) {
                     if !diagnostics.fixed.is_empty() {
                         writeln!(writer)?;
-                        print_fixed(writer, &diagnostics.fixed)?;
+                        print_fix_summary(writer, &diagnostics.fixed)?;
                         writeln!(writer)?;
                     }
                 }
@@ -225,7 +240,11 @@ impl Printer {
         Ok(())
     }
 
-    pub fn write_statistics(&self, diagnostics: &Diagnostics) -> Result<()> {
+    pub(crate) fn write_statistics(
+        &self,
+        diagnostics: &Diagnostics,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
         let statistics: Vec<ExpandedStatistics> = diagnostics
             .messages
             .iter()
@@ -233,7 +252,7 @@ impl Printer {
                 (
                     message.kind.rule(),
                     &message.kind.body,
-                    message.kind.fixable,
+                    message.fix.is_some(),
                 )
             })
             .sorted()
@@ -261,7 +280,6 @@ impl Printer {
             return Ok(());
         }
 
-        let mut stdout = BufWriter::new(io::stdout().lock());
         match self.format {
             SerializationFormat::Text => {
                 // Compute the maximum number of digits in the count and code, for all messages,
@@ -286,7 +304,7 @@ impl Printer {
                 // By default, we mimic Flake8's `--statistics` format.
                 for statistic in statistics {
                     writeln!(
-                        stdout,
+                        writer,
                         "{:>count_width$}\t{:<code_width$}\t{}{}",
                         statistic.count.to_string().bold(),
                         statistic.code.to_string().red().bold(),
@@ -305,7 +323,7 @@ impl Printer {
                 return Ok(());
             }
             SerializationFormat::Json => {
-                writeln!(stdout, "{}", serde_json::to_string_pretty(&statistics)?)?;
+                writeln!(writer, "{}", serde_json::to_string_pretty(&statistics)?)?;
             }
             _ => {
                 anyhow::bail!(
@@ -315,12 +333,16 @@ impl Printer {
             }
         }
 
-        stdout.flush()?;
+        writer.flush()?;
 
         Ok(())
     }
 
-    pub fn write_continuously(&self, diagnostics: &Diagnostics) -> Result<()> {
+    pub(crate) fn write_continuously(
+        &self,
+        writer: &mut dyn Write,
+        diagnostics: &Diagnostics,
+    ) -> Result<()> {
         if matches!(self.log_level, LogLevel::Silent) {
             return Ok(());
         }
@@ -337,23 +359,23 @@ impl Printer {
             );
         }
 
-        let mut stdout = BufWriter::new(io::stdout().lock());
         if !diagnostics.messages.is_empty() {
             if self.log_level >= LogLevel::Default {
-                writeln!(stdout)?;
+                writeln!(writer)?;
             }
 
-            let context = EmitterContext::new(&diagnostics.jupyter_index);
+            let context = EmitterContext::new(&diagnostics.source_kind);
             TextEmitter::default()
                 .with_show_fix_status(show_fix_status(self.autofix_level))
-                .emit(&mut stdout, &diagnostics.messages, &context)?;
+                .with_show_source(self.flags.contains(Flags::SHOW_SOURCE))
+                .emit(writer, &diagnostics.messages, &context)?;
         }
-        stdout.flush()?;
+        writer.flush()?;
 
         Ok(())
     }
 
-    pub fn clear_screen() -> Result<()> {
+    pub(crate) fn clear_screen() -> Result<()> {
         #[cfg(not(target_family = "wasm"))]
         clearscreen::clear()?;
         Ok(())
@@ -374,10 +396,10 @@ const fn show_fix_status(autofix_level: flags::FixMode) -> bool {
     // this pass! (We're occasionally unable to determine whether a specific
     // violation is fixable without trying to fix it, so if autofix is not
     // enabled, we may inadvertently indicate that a rule is fixable.)
-    !matches!(autofix_level, flags::FixMode::Apply)
+    !autofix_level.is_apply()
 }
 
-fn print_fixed<T: Write>(stdout: &mut T, fixed: &FxHashMap<String, FixTable>) -> Result<()> {
+fn print_fix_summary(writer: &mut dyn Write, fixed: &FxHashMap<String, FixTable>) -> Result<()> {
     let total = fixed
         .values()
         .map(|table| table.values().sum::<usize>())
@@ -393,14 +415,14 @@ fn print_fixed<T: Write>(stdout: &mut T, fixed: &FxHashMap<String, FixTable>) ->
 
     let s = if total == 1 { "" } else { "s" };
     let label = format!("Fixed {total} error{s}:");
-    writeln!(stdout, "{}", label.bold().green())?;
+    writeln!(writer, "{}", label.bold().green())?;
 
     for (filename, table) in fixed
         .iter()
         .sorted_by_key(|(filename, ..)| filename.as_str())
     {
         writeln!(
-            stdout,
+            writer,
             "{} {}{}",
             "-".cyan(),
             relativize_path(filename).bold(),
@@ -408,7 +430,7 @@ fn print_fixed<T: Write>(stdout: &mut T, fixed: &FxHashMap<String, FixTable>) ->
         )?;
         for (rule, count) in table.iter().sorted_by_key(|(.., count)| Reverse(*count)) {
             writeln!(
-                stdout,
+                writer,
                 "    {count:>num_digits$} × {} ({})",
                 rule.noqa_code().to_string().red().bold(),
                 rule.as_ref(),

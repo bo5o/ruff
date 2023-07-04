@@ -1,22 +1,21 @@
-use rustpython_parser::ast::{Excepthandler, ExcepthandlerKind, ExprKind};
+use rustpython_parser::ast::{self, ExceptHandler, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-enum Boolop {
+enum BoolOp {
     And,
     Or,
 }
 
-impl From<&rustpython_parser::ast::Boolop> for Boolop {
-    fn from(op: &rustpython_parser::ast::Boolop) -> Self {
+impl From<&ast::BoolOp> for BoolOp {
+    fn from(op: &ast::BoolOp) -> Self {
         match op {
-            rustpython_parser::ast::Boolop::And => Boolop::And,
-            rustpython_parser::ast::Boolop::Or => Boolop::Or,
+            ast::BoolOp::And => BoolOp::And,
+            ast::BoolOp::Or => BoolOp::Or,
         }
     }
 }
@@ -43,12 +42,12 @@ impl From<&rustpython_parser::ast::Boolop> for Boolop {
 /// ```python
 /// try:
 ///     pass
-/// except (A ,B):
+/// except (A, B):
 ///     pass
 /// ```
 #[violation]
 pub struct BinaryOpException {
-    op: Boolop,
+    op: BoolOp,
 }
 
 impl Violation for BinaryOpException {
@@ -56,26 +55,27 @@ impl Violation for BinaryOpException {
     fn message(&self) -> String {
         let BinaryOpException { op } = self;
         match op {
-            Boolop::And => format!("Exception to catch is the result of a binary `and` operation"),
-            Boolop::Or => format!("Exception to catch is the result of a binary `or` operation"),
+            BoolOp::And => format!("Exception to catch is the result of a binary `and` operation"),
+            BoolOp::Or => format!("Exception to catch is the result of a binary `or` operation"),
         }
     }
 }
 
 /// PLW0711
-pub fn binary_op_exception(checker: &mut Checker, excepthandler: &Excepthandler) {
-    let ExcepthandlerKind::ExceptHandler { type_, .. } = &excepthandler.node;
+pub(crate) fn binary_op_exception(checker: &mut Checker, except_handler: &ExceptHandler) {
+    let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler { type_, .. }) =
+        except_handler;
 
     let Some(type_) = type_ else {
         return;
     };
 
-    let ExprKind::BoolOp { op, .. } = &type_.node else {
+    let Expr::BoolOp(ast::ExprBoolOp { op, .. }) = type_.as_ref() else {
         return;
     };
 
     checker.diagnostics.push(Diagnostic::new(
         BinaryOpException { op: op.into() },
-        Range::from(type_),
+        type_.range(),
     ));
 }

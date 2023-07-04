@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Cmpop, Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, CmpOp, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::Rule;
@@ -78,7 +77,7 @@ impl Violation for UnrecognizedPlatformCheck {
 /// - [PEP 484](https://peps.python.org/pep-0484/#version-and-platform-checking)
 #[violation]
 pub struct UnrecognizedPlatformName {
-    pub platform: String,
+    platform: String,
 }
 
 impl Violation for UnrecognizedPlatformName {
@@ -90,73 +89,63 @@ impl Violation for UnrecognizedPlatformName {
 }
 
 /// PYI007, PYI008
-pub fn unrecognized_platform(
-    checker: &mut Checker,
-    expr: &Expr,
-    left: &Expr,
-    ops: &[Cmpop],
-    comparators: &[Expr],
-) {
-    let ([op], [right]) = (ops, comparators) else {
+pub(crate) fn unrecognized_platform(checker: &mut Checker, test: &Expr) {
+    let Expr::Compare(ast::ExprCompare {
+        left,
+        ops,
+        comparators,
+        ..
+    }) = test
+    else {
         return;
     };
 
-    let diagnostic_unrecognized_platform_check =
-        Diagnostic::new(UnrecognizedPlatformCheck, Range::from(expr));
+    let ([op], [right]) = (ops.as_slice(), comparators.as_slice()) else {
+        return;
+    };
+
     if !checker
-        .ctx
+        .semantic()
         .resolve_call_path(left)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["sys", "platform"]
+            matches!(call_path.as_slice(), ["sys", "platform"])
         })
     {
         return;
     }
 
     // "in" might also make sense but we don't currently have one.
-    if !matches!(op, Cmpop::Eq | Cmpop::NotEq)
-        && checker
-            .settings
-            .rules
-            .enabled(Rule::UnrecognizedPlatformCheck)
-    {
-        checker
-            .diagnostics
-            .push(diagnostic_unrecognized_platform_check);
+    if !matches!(op, CmpOp::Eq | CmpOp::NotEq) {
+        if checker.enabled(Rule::UnrecognizedPlatformCheck) {
+            checker
+                .diagnostics
+                .push(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
+        }
         return;
     }
 
-    match &right.node {
-        ExprKind::Constant {
-            value: Constant::Str(value),
-            ..
-        } => {
-            // Other values are possible but we don't need them right now.
-            // This protects against typos.
-            if !["linux", "win32", "cygwin", "darwin"].contains(&value.as_str())
-                && checker
-                    .settings
-                    .rules
-                    .enabled(Rule::UnrecognizedPlatformName)
-            {
+    if let Expr::Constant(ast::ExprConstant {
+        value: Constant::Str(value),
+        ..
+    }) = right
+    {
+        // Other values are possible but we don't need them right now.
+        // This protects against typos.
+        if checker.enabled(Rule::UnrecognizedPlatformName) {
+            if !matches!(value.as_str(), "linux" | "win32" | "cygwin" | "darwin") {
                 checker.diagnostics.push(Diagnostic::new(
                     UnrecognizedPlatformName {
                         platform: value.clone(),
                     },
-                    Range::from(right),
+                    right.range(),
                 ));
             }
         }
-        _ => {
-            if checker
-                .settings
-                .rules
-                .enabled(Rule::UnrecognizedPlatformCheck)
-            {
-                checker
-                    .diagnostics
-                    .push(diagnostic_unrecognized_platform_check);
-            }
+    } else {
+        if checker.enabled(Rule::UnrecognizedPlatformCheck) {
+            checker
+                .diagnostics
+                .push(Diagnostic::new(UnrecognizedPlatformCheck, test.range()));
         }
     }
 }

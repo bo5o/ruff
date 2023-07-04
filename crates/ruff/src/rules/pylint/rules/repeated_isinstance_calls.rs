@@ -1,55 +1,99 @@
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustpython_parser::ast::{Boolop, Expr, ExprKind};
+use rustpython_parser::ast::{self, BoolOp, Expr, Ranged};
 
-use ruff_diagnostics::{Diagnostic, Violation};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::hashable::HashableExpr;
-use ruff_python_ast::helpers::unparse_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
+use crate::registry::AsRule;
+use crate::settings::types::PythonVersion;
 
+/// ## What it does
+/// Checks for repeated `isinstance` calls on the same object.
+///
+/// ## Why is this bad?
+/// Repeated `isinstance` calls on the same object can be merged into a
+/// single call.
+///
+/// ## Example
+/// ```python
+/// def is_number(x):
+///     return isinstance(x, int) or isinstance(x, float) or isinstance(x, complex)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def is_number(x):
+///     return isinstance(x, (int, float, complex))
+/// ```
+///
+/// Or, for Python 3.10 and later:
+///
+/// ```python
+/// def is_number(x):
+///     return isinstance(x, int | float | complex)
+/// ```
+///
+/// ## Options
+/// - `target-version`
+///
+/// ## References
+/// - [Python documentation: `isinstance`](https://docs.python.org/3/library/functions.html#isinstance)
 #[violation]
 pub struct RepeatedIsinstanceCalls {
-    pub obj: String,
-    pub types: Vec<String>,
+    expr: String,
 }
 
-impl Violation for RepeatedIsinstanceCalls {
+impl AlwaysAutofixableViolation for RepeatedIsinstanceCalls {
     #[derive_message_formats]
     fn message(&self) -> String {
-        let RepeatedIsinstanceCalls { obj, types } = self;
-        let types = types.join(", ");
-        format!("Merge these isinstance calls: `isinstance({obj}, ({types}))`")
+        let RepeatedIsinstanceCalls { expr } = self;
+        format!("Merge `isinstance` calls: `{expr}`")
+    }
+
+    fn autofix_title(&self) -> String {
+        let RepeatedIsinstanceCalls { expr } = self;
+        format!("Replace with `{expr}`")
     }
 }
 
 /// PLR1701
-pub fn repeated_isinstance_calls(checker: &mut Checker, expr: &Expr, op: &Boolop, values: &[Expr]) {
-    if !matches!(op, Boolop::Or) || !checker.ctx.is_builtin("isinstance") {
+pub(crate) fn repeated_isinstance_calls(
+    checker: &mut Checker,
+    expr: &Expr,
+    op: BoolOp,
+    values: &[Expr],
+) {
+    if !op.is_or() {
         return;
     }
 
     let mut obj_to_types: FxHashMap<HashableExpr, (usize, FxHashSet<HashableExpr>)> =
         FxHashMap::default();
     for value in values {
-        let ExprKind::Call { func, args, .. } = &value.node else {
+        let Expr::Call(ast::ExprCall { func, args, .. }) = value else {
             continue;
         };
-        if !matches!(&func.node, ExprKind::Name { id, .. } if id == "isinstance") {
+        if !matches!(func.as_ref(), Expr::Name(ast::ExprName { id, .. }) if id == "isinstance") {
             continue;
         }
         let [obj, types] = &args[..] else {
             continue;
         };
+        if !checker.semantic().is_builtin("isinstance") {
+            return;
+        }
         let (num_calls, matches) = obj_to_types
             .entry(obj.into())
             .or_insert_with(|| (0, FxHashSet::default()));
 
         *num_calls += 1;
-        matches.extend(match &types.node {
-            ExprKind::Tuple { elts, .. } => elts.iter().map(HashableExpr::from_expr).collect(),
+        matches.extend(match types {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
+                elts.iter().map(HashableExpr::from_expr).collect()
+            }
             _ => {
                 vec![types.into()]
             }
@@ -58,18 +102,33 @@ pub fn repeated_isinstance_calls(checker: &mut Checker, expr: &Expr, op: &Boolop
 
     for (obj, (num_calls, types)) in obj_to_types {
         if num_calls > 1 && types.len() > 1 {
-            checker.diagnostics.push(Diagnostic::new(
-                RepeatedIsinstanceCalls {
-                    obj: unparse_expr(obj.as_expr(), checker.stylist),
-                    types: types
-                        .iter()
-                        .map(HashableExpr::as_expr)
-                        .map(|expr| unparse_expr(expr, checker.stylist))
-                        .sorted()
-                        .collect(),
-                },
-                Range::from(expr),
-            ));
+            let call = merged_isinstance_call(
+                &checker.generator().expr(obj.as_expr()),
+                types
+                    .iter()
+                    .map(HashableExpr::as_expr)
+                    .map(|expr| checker.generator().expr(expr))
+                    .sorted(),
+                checker.settings.target_version,
+            );
+            let mut diagnostic =
+                Diagnostic::new(RepeatedIsinstanceCalls { expr: call.clone() }, expr.range());
+            if checker.patch(diagnostic.kind.rule()) {
+                diagnostic.set_fix(Fix::automatic(Edit::range_replacement(call, expr.range())));
+            }
+            checker.diagnostics.push(diagnostic);
         }
+    }
+}
+
+fn merged_isinstance_call(
+    obj: &str,
+    types: impl IntoIterator<Item = String>,
+    target_version: PythonVersion,
+) -> String {
+    if target_version >= PythonVersion::Py310 {
+        format!("isinstance({}, {})", obj, types.into_iter().join(" | "))
+    } else {
+        format!("isinstance({}, ({}))", obj, types.into_iter().join(", "))
     }
 }

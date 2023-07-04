@@ -1,12 +1,37 @@
 use itertools::Itertools;
-use rustpython_parser::ast::{Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Checks for uses of multi-character strings in `.strip()`, `.lstrip()`, and
+/// `.rstrip()` calls.
+///
+/// ## Why is this bad?
+/// All characters in the call to `.strip()`, `.lstrip()`, or `.rstrip()` are
+/// removed from the leading and trailing ends of the string. If the string
+/// contains multiple characters, the reader may be misled into thinking that
+/// a prefix or suffix is being removed, rather than a set of characters.
+///
+/// In Python 3.9 and later, you can use `str#removeprefix` and
+/// `str#removesuffix` to remove an exact prefix or suffix from a string,
+/// respectively, which should be preferred when possible.
+///
+/// ## Example
+/// ```python
+/// "abcba".strip("ab")  # "c"
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "abcba".removeprefix("ab").removesuffix("ba")  # "c"
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str.strip`](https://docs.python.org/3/library/stdtypes.html#str.strip)
 #[violation]
 pub struct StripWithMultiCharacters;
 
@@ -18,8 +43,13 @@ impl Violation for StripWithMultiCharacters {
 }
 
 /// B005
-pub fn strip_with_multi_characters(checker: &mut Checker, expr: &Expr, func: &Expr, args: &[Expr]) {
-    let ExprKind::Attribute { attr, .. } = &func.node else {
+pub(crate) fn strip_with_multi_characters(
+    checker: &mut Checker,
+    expr: &Expr,
+    func: &Expr,
+    args: &[Expr],
+) {
+    let Expr::Attribute(ast::ExprAttribute { attr, .. }) = func else {
         return;
     };
     if !matches!(attr.as_str(), "strip" | "lstrip" | "rstrip") {
@@ -29,10 +59,11 @@ pub fn strip_with_multi_characters(checker: &mut Checker, expr: &Expr, func: &Ex
         return;
     }
 
-    let ExprKind::Constant {
+    let Expr::Constant(ast::ExprConstant {
         value: Constant::Str(value),
         ..
-    } = &args[0].node else {
+    }) = &args[0]
+    else {
         return;
     };
 
@@ -40,6 +71,6 @@ pub fn strip_with_multi_characters(checker: &mut Checker, expr: &Expr, func: &Ex
     if num_chars > 1 && num_chars != value.chars().unique().count() {
         checker
             .diagnostics
-            .push(Diagnostic::new(StripWithMultiCharacters, Range::from(expr)));
+            .push(Diagnostic::new(StripWithMultiCharacters, expr.range()));
     }
 }

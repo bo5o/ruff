@@ -3,22 +3,23 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::generate_all::{Mode, REGENERATE_ALL_COMMAND};
 use anyhow::{bail, Result};
 use pretty_assertions::StrComparison;
-use ruff::settings::options::Options;
 use schemars::schema_for;
 
+use ruff::settings::options::Options;
+
+use crate::generate_all::{Mode, REGENERATE_ALL_COMMAND};
 use crate::ROOT_DIR;
 
 #[derive(clap::Args)]
-pub struct Args {
+pub(crate) struct Args {
     /// Write the generated table to stdout (rather than to `ruff.schema.json`).
     #[arg(long, default_value_t, value_enum)]
     pub(crate) mode: Mode,
 }
 
-pub fn main(args: &Args) -> Result<()> {
+pub(crate) fn main(args: &Args) -> Result<()> {
     let schema = schema_for!(Options);
     let schema_string = serde_json::to_string_pretty(&schema).unwrap();
     let filename = "ruff.schema.json";
@@ -31,15 +32,20 @@ pub fn main(args: &Args) -> Result<()> {
         Mode::Check => {
             let current = fs::read_to_string(schema_path)?;
             if current == schema_string {
-                println!("up-to-date: {filename}");
+                println!("Up-to-date: {filename}");
             } else {
                 let comparison = StrComparison::new(&current, &schema_string);
                 bail!("{filename} changed, please run `{REGENERATE_ALL_COMMAND}`:\n{comparison}");
             }
         }
         Mode::Write => {
-            let file = schema_path;
-            fs::write(file, schema_string.as_bytes())?;
+            let current = fs::read_to_string(&schema_path)?;
+            if current == schema_string {
+                println!("Up-to-date: {filename}");
+            } else {
+                println!("Updating: {filename}");
+                fs::write(schema_path, schema_string.as_bytes())?;
+            }
         }
     }
 
@@ -47,13 +53,21 @@ pub fn main(args: &Args) -> Result<()> {
 }
 
 #[cfg(test)]
-mod test {
-    use super::{main, Args};
-    use crate::generate_all::Mode;
+mod tests {
     use anyhow::Result;
+    use std::env;
 
-    #[test]
+    use crate::generate_all::Mode;
+
+    use super::{main, Args};
+
+    #[cfg_attr(not(feature = "unreachable-code"), test)]
     fn test_generate_json_schema() -> Result<()> {
-        main(&Args { mode: Mode::Check })
+        let mode = if env::var("RUFF_UPDATE_SCHEMA").as_deref() == Ok("1") {
+            Mode::Write
+        } else {
+            Mode::Check
+        };
+        main(&Args { mode })
     }
 }

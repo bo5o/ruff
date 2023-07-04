@@ -1,10 +1,9 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged};
 
-use ruff_diagnostics::AlwaysAutofixableViolation;
-use ruff_diagnostics::Diagnostic;
+use ruff_diagnostics::Violation;
+use ruff_diagnostics::{AutofixKind, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::helpers::any_over_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -43,19 +42,21 @@ use crate::rules::flake8_comprehensions::fixes;
 #[violation]
 pub struct UnnecessaryComprehensionAnyAll;
 
-impl AlwaysAutofixableViolation for UnnecessaryComprehensionAnyAll {
+impl Violation for UnnecessaryComprehensionAnyAll {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         format!("Unnecessary list comprehension.")
     }
 
-    fn autofix_title(&self) -> String {
-        "Remove unnecessary list comprehension".to_string()
+    fn autofix_title(&self) -> Option<String> {
+        Some("Remove unnecessary list comprehension".to_string())
     }
 }
 
 /// C419
-pub fn unnecessary_comprehension_any_all(
+pub(crate) fn unnecessary_comprehension_any_all(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
@@ -65,20 +66,22 @@ pub fn unnecessary_comprehension_any_all(
     if !keywords.is_empty() {
         return;
     }
-    let ExprKind::Name { id, .. } = &func.node  else {
+    let Expr::Name(ast::ExprName { id, .. }) = func else {
         return;
     };
     if (matches!(id.as_str(), "all" | "any")) && args.len() == 1 {
-        let (ExprKind::ListComp { elt, .. } | ExprKind::SetComp { elt, .. }) = &args[0].node else {
+        let (Expr::ListComp(ast::ExprListComp { elt, .. })
+        | Expr::SetComp(ast::ExprSetComp { elt, .. })) = &args[0]
+        else {
             return;
         };
-        if is_async_generator(elt) {
+        if contains_await(elt) {
             return;
         }
-        if !checker.ctx.is_builtin(id) {
+        if !checker.semantic().is_builtin(id) {
             return;
         }
-        let mut diagnostic = Diagnostic::new(UnnecessaryComprehensionAnyAll, Range::from(&args[0]));
+        let mut diagnostic = Diagnostic::new(UnnecessaryComprehensionAnyAll, args[0].range());
         if checker.patch(diagnostic.kind.rule()) {
             diagnostic.try_set_fix(|| {
                 fixes::fix_unnecessary_comprehension_any_all(checker.locator, checker.stylist, expr)
@@ -88,7 +91,7 @@ pub fn unnecessary_comprehension_any_all(
     }
 }
 
-/// Return `true` if the `Expr` contains an `await` expression.
-fn is_async_generator(expr: &Expr) -> bool {
-    any_over_expr(expr, &|expr| matches!(expr.node, ExprKind::Await { .. }))
+/// Return `true` if the [`Expr`] contains an `await` expression.
+fn contains_await(expr: &Expr) -> bool {
+    any_over_expr(expr, &Expr::is_await_expr)
 }

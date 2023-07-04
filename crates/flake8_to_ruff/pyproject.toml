@@ -23,10 +23,10 @@ description = "Convert existing Flake8 configuration to Ruff."
 requires-python = ">=3.7"
 
 [project.urls]
-repository = "https://github.com/charliermarsh/ruff#subdirectory=crates/flake8_to_ruff"
+repository = "https://github.com/astral-sh/ruff#subdirectory=crates/flake8_to_ruff"
 
 [build-system]
-requires = ["maturin>=0.14,<0.15"]
+requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]

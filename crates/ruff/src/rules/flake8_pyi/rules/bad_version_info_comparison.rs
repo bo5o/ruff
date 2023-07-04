@@ -1,13 +1,12 @@
-use rustpython_parser::ast::{Cmpop, Expr};
+use rustpython_parser::ast::{self, CmpOp, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
 /// ## What it does
-/// Checks for usages of comparators other than `<` and `>=` for
+/// Checks for uses of comparators other than `<` and `>=` for
 /// `sys.version_info` checks in `.pyi` files. All other comparators, such
 /// as `>`, `<=`, and `==`, are banned.
 ///
@@ -53,34 +52,41 @@ pub struct BadVersionInfoComparison;
 impl Violation for BadVersionInfoComparison {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Use `<` or `>=` for version info comparisons")
+        format!("Use `<` or `>=` for `sys.version_info` comparisons")
     }
 }
 
 /// PYI006
-pub fn bad_version_info_comparison(
-    checker: &mut Checker,
-    expr: &Expr,
-    left: &Expr,
-    ops: &[Cmpop],
-    comparators: &[Expr],
-) {
-    let ([op], [_right]) = (ops, comparators) else {
+pub(crate) fn bad_version_info_comparison(checker: &mut Checker, test: &Expr) {
+    let Expr::Compare(ast::ExprCompare {
+        left,
+        ops,
+        comparators,
+        ..
+    }) = test
+    else {
+        return;
+    };
+
+    let ([op], [_right]) = (ops.as_slice(), comparators.as_slice()) else {
         return;
     };
 
     if !checker
-        .ctx
+        .semantic()
         .resolve_call_path(left)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["sys", "version_info"]
+            matches!(call_path.as_slice(), ["sys", "version_info"])
         })
     {
         return;
     }
 
-    if !matches!(op, Cmpop::Lt | Cmpop::GtE) {
-        let diagnostic = Diagnostic::new(BadVersionInfoComparison, Range::from(expr));
-        checker.diagnostics.push(diagnostic);
+    if matches!(op, CmpOp::Lt | CmpOp::GtE) {
+        return;
     }
+
+    checker
+        .diagnostics
+        .push(Diagnostic::new(BadVersionInfoComparison, test.range()));
 }

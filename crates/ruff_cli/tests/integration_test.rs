@@ -12,7 +12,7 @@ use path_absolutize::path_dedot;
 const BIN_NAME: &str = "ruff";
 
 #[test]
-fn test_stdin_success() -> Result<()> {
+fn stdin_success() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.args(["-", "--format", "text", "--isolated"])
         .write_stdin("")
@@ -22,7 +22,7 @@ fn test_stdin_success() -> Result<()> {
 }
 
 #[test]
-fn test_stdin_error() -> Result<()> {
+fn stdin_error() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args(["-", "--format", "text", "--isolated"])
@@ -40,7 +40,7 @@ Found 1 error.
 }
 
 #[test]
-fn test_stdin_filename() -> Result<()> {
+fn stdin_filename() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args([
@@ -66,7 +66,7 @@ Found 1 error.
 
 #[cfg(unix)]
 #[test]
-fn test_stdin_json() -> Result<()> {
+fn stdin_json() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args([
@@ -91,33 +91,35 @@ fn test_stdin_json() -> Result<()> {
             r#"[
   {{
     "code": "F401",
-    "message": "`os` imported but unused",
+    "end_location": {{
+      "column": 10,
+      "row": 1
+    }},
+    "filename": "{file_path}",
     "fix": {{
-      "message": "Remove unused import: `os`",
+      "applicability": "Automatic",
       "edits": [
         {{
           "content": "",
-          "location": {{
-            "row": 1,
-            "column": 0
-          }},
           "end_location": {{
-            "row": 2,
-            "column": 0
+            "column": 1,
+            "row": 2
+          }},
+          "location": {{
+            "column": 1,
+            "row": 1
           }}
         }}
-      ]
+      ],
+      "message": "Remove unused import: `os`"
     }},
     "location": {{
-      "row": 1,
-      "column": 8
+      "column": 8,
+      "row": 1
     }},
-    "end_location": {{
-      "row": 1,
-      "column": 10
-    }},
-    "filename": "{file_path}",
-    "noqa_row": 1
+    "message": "`os` imported but unused",
+    "noqa_row": 1,
+    "url": "https://beta.ruff.rs/docs/rules/unused-import"
   }}
 ]"#
         )
@@ -126,7 +128,7 @@ fn test_stdin_json() -> Result<()> {
 }
 
 #[test]
-fn test_stdin_autofix() -> Result<()> {
+fn stdin_autofix() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args(["-", "--format", "text", "--fix", "--isolated"])
@@ -141,7 +143,7 @@ fn test_stdin_autofix() -> Result<()> {
 }
 
 #[test]
-fn test_stdin_autofix_when_not_fixable_should_still_print_contents() -> Result<()> {
+fn stdin_autofix_when_not_fixable_should_still_print_contents() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args(["-", "--format", "text", "--fix", "--isolated"])
@@ -156,7 +158,7 @@ fn test_stdin_autofix_when_not_fixable_should_still_print_contents() -> Result<(
 }
 
 #[test]
-fn test_stdin_autofix_when_no_issues_should_still_print_contents() -> Result<()> {
+fn stdin_autofix_when_no_issues_should_still_print_contents() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args(["-", "--format", "text", "--fix", "--isolated"])
@@ -171,7 +173,7 @@ fn test_stdin_autofix_when_no_issues_should_still_print_contents() -> Result<()>
 }
 
 #[test]
-fn test_show_source() -> Result<()> {
+fn show_source() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
         .args(["-", "--format", "text", "--show-source", "--isolated"])
@@ -195,7 +197,15 @@ fn explain_status_codes() -> Result<()> {
 fn show_statistics() -> Result<()> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     let output = cmd
-        .args(["-", "--format", "text", "--select", "F401", "--statistics"])
+        .args([
+            "-",
+            "--format",
+            "text",
+            "--select",
+            "F401",
+            "--statistics",
+            "--isolated",
+        ])
         .write_stdin("import sys\nimport os\n\nprint(os.getuid())\n")
         .assert()
         .failure();
@@ -206,5 +216,65 @@ fn show_statistics() -> Result<()> {
             .unwrap(),
         "1\tF401\t[*] `sys` imported but unused"
     );
+    Ok(())
+}
+
+#[test]
+fn nursery_prefix() -> Result<()> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+
+    // `--select E` should detect E741, but not E225, which is in the nursery.
+    let output = cmd
+        .args(["-", "--format", "text", "--isolated", "--select", "E"])
+        .write_stdin("I=42\n")
+        .assert()
+        .failure();
+    assert_eq!(
+        str::from_utf8(&output.get_output().stdout)?,
+        r#"-:1:1: E741 Ambiguous variable name: `I`
+Found 1 error.
+"#
+    );
+
+    Ok(())
+}
+
+#[test]
+fn nursery_all() -> Result<()> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+
+    // `--select ALL` should detect E741, but not E225, which is in the nursery.
+    let output = cmd
+        .args(["-", "--format", "text", "--isolated", "--select", "E"])
+        .write_stdin("I=42\n")
+        .assert()
+        .failure();
+    assert_eq!(
+        str::from_utf8(&output.get_output().stdout)?,
+        r#"-:1:1: E741 Ambiguous variable name: `I`
+Found 1 error.
+"#
+    );
+
+    Ok(())
+}
+
+#[test]
+fn nursery_direct() -> Result<()> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+
+    // `--select E225` should detect E225.
+    let output = cmd
+        .args(["-", "--format", "text", "--isolated", "--select", "E225"])
+        .write_stdin("I=42\n")
+        .assert()
+        .failure();
+    assert_eq!(
+        str::from_utf8(&output.get_output().stdout)?,
+        r#"-:1:2: E225 Missing whitespace around operator
+Found 1 error.
+"#
+    );
+
     Ok(())
 }

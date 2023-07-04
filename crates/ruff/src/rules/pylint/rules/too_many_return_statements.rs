@@ -2,14 +2,59 @@ use rustpython_parser::ast::Stmt;
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::{identifier_range, ReturnStatementVisitor};
-use ruff_python_ast::source_code::Locator;
-use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::helpers::ReturnStatementVisitor;
+use ruff_python_ast::identifier::Identifier;
+use ruff_python_ast::statement_visitor::StatementVisitor;
 
+/// ## What it does
+/// Checks for functions or methods with too many return statements.
+///
+/// By default, this rule allows up to six return statements, as configured by
+/// the `pylint.max-returns` option.
+///
+/// ## Why is this bad?
+/// Functions or methods with many return statements are harder to understand
+/// and maintain, and often indicative of complex logic.
+///
+/// ## Example
+/// ```python
+/// def capital(country: str) -> str | None:
+///     if country == "England":
+///         return "London"
+///     elif country == "France":
+///         return "Paris"
+///     elif country == "Poland":
+///         return "Warsaw"
+///     elif country == "Romania":
+///         return "Bucharest"
+///     elif country == "Spain":
+///         return "Madrid"
+///     elif country == "Thailand":
+///         return "Bangkok"
+///     else:
+///         return None
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def capital(country: str) -> str | None:
+///     capitals = {
+///         "England": "London",
+///         "France": "Paris",
+///         "Poland": "Warsaw",
+///         "Romania": "Bucharest",
+///         "Spain": "Madrid",
+///         "Thailand": "Bangkok",
+///     }
+///     return capitals.get(country)
+/// ```
+///
+/// ## Options
+/// - `pylint.max-returns`
 #[violation]
 pub struct TooManyReturnStatements {
-    pub returns: usize,
-    pub max_returns: usize,
+    returns: usize,
+    max_returns: usize,
 }
 
 impl Violation for TooManyReturnStatements {
@@ -31,11 +76,10 @@ fn num_returns(body: &[Stmt]) -> usize {
 }
 
 /// PLR0911
-pub fn too_many_return_statements(
+pub(crate) fn too_many_return_statements(
     stmt: &Stmt,
     body: &[Stmt],
     max_returns: usize,
-    locator: &Locator,
 ) -> Option<Diagnostic> {
     let returns = num_returns(body);
     if returns > max_returns {
@@ -44,7 +88,7 @@ pub fn too_many_return_statements(
                 returns,
                 max_returns,
             },
-            identifier_range(stmt, locator),
+            stmt.identifier(),
         ))
     } else {
         None
@@ -54,12 +98,13 @@ pub fn too_many_return_statements(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use rustpython_parser as parser;
+    use rustpython_parser::ast::Suite;
+    use rustpython_parser::Parse;
 
     use super::num_returns;
 
     fn test_helper(source: &str, expected: usize) -> Result<()> {
-        let stmts = parser::parse_program(source, "<filename>")?;
+        let stmts = Suite::parse(source, "<filename>")?;
         assert_eq!(num_returns(&stmts), expected);
         Ok(())
     }

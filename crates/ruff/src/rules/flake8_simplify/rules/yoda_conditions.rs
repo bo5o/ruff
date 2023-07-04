@@ -1,17 +1,47 @@
 use anyhow::Result;
-use libcst_native::{Codegen, CodegenState, CompOp};
-use rustpython_parser::ast::{Cmpop, Expr, ExprKind, Unaryop};
+use libcst_native::CompOp;
+use rustpython_parser::ast::{self, CmpOp, Expr, Ranged, UnaryOp};
 
-use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Violation};
+use crate::autofix::codemods::CodegenStylist;
+use ruff_diagnostics::{AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::source_code::{Locator, Stylist};
-use ruff_python_ast::types::Range;
 use ruff_python_stdlib::str::{self};
 
 use crate::checkers::ast::Checker;
 use crate::cst::matchers::{match_comparison, match_expression};
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for conditions that position a constant on the left-hand side of the
+/// comparison operator, rather than the right-hand side.
+///
+/// ## Why is this bad?
+/// These conditions (sometimes referred to as "Yoda conditions") are less
+/// readable than conditions that place the variable on the left-hand side of
+/// the comparison operator.
+///
+/// In some languages, Yoda conditions are used to prevent accidental
+/// assignment in conditions (i.e., accidental uses of the `=` operator,
+/// instead of the `==` operator). However, Python does not allow assignments
+/// in conditions unless using the `:=` operator, so Yoda conditions provide
+/// no benefit in this regard.
+///
+/// ## Example
+/// ```python
+/// if "Foo" == foo:
+///     ...
+/// ```
+///
+/// Use instead:
+/// ```python
+/// if foo == "Foo":
+///     ...
+/// ```
+///
+/// ## References
+/// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
+/// - [Python documentation: Assignment statements](https://docs.python.org/3/reference/simple_stmts.html#assignment-statements)
 #[violation]
 pub struct YodaConditions {
     pub suggestion: Option<String>,
@@ -30,41 +60,37 @@ impl Violation for YodaConditions {
         }
     }
 
-    fn autofix_title_formatter(&self) -> Option<fn(&Self) -> String> {
+    fn autofix_title(&self) -> Option<String> {
         let YodaConditions { suggestion } = self;
-        if suggestion.is_some() {
-            Some(|YodaConditions { suggestion }| {
-                let suggestion = suggestion.as_ref().unwrap();
-                format!("Replace Yoda condition with `{suggestion}`")
-            })
-        } else {
-            None
-        }
+        suggestion
+            .as_ref()
+            .map(|suggestion| format!("Replace Yoda condition with `{suggestion}`"))
     }
 }
 
 /// Return `true` if an [`Expr`] is a constant or a constant-like name.
 fn is_constant_like(expr: &Expr) -> bool {
-    match &expr.node {
-        ExprKind::Attribute { attr, .. } => str::is_upper(attr),
-        ExprKind::Constant { .. } => true,
-        ExprKind::Tuple { elts, .. } => elts.iter().all(is_constant_like),
-        ExprKind::Name { id, .. } => str::is_upper(id),
-        ExprKind::UnaryOp {
-            op: Unaryop::UAdd | Unaryop::USub | Unaryop::Invert,
+    match expr {
+        Expr::Attribute(ast::ExprAttribute { attr, .. }) => str::is_cased_uppercase(attr),
+        Expr::Constant(_) => true,
+        Expr::Tuple(ast::ExprTuple { elts, .. }) => elts.iter().all(is_constant_like),
+        Expr::Name(ast::ExprName { id, .. }) => str::is_cased_uppercase(id),
+        Expr::UnaryOp(ast::ExprUnaryOp {
+            op: UnaryOp::UAdd | UnaryOp::USub | UnaryOp::Invert,
             operand,
-        } => matches!(operand.node, ExprKind::Constant { .. }),
+            range: _,
+        }) => operand.is_constant_expr(),
         _ => false,
     }
 }
 
 /// Generate a fix to reverse a comparison.
 fn reverse_comparison(expr: &Expr, locator: &Locator, stylist: &Stylist) -> Result<String> {
-    let range = Range::from(expr);
+    let range = expr.range();
     let contents = locator.slice(range);
 
     let mut expression = match_expression(contents)?;
-    let mut comparison = match_comparison(&mut expression)?;
+    let comparison = match_comparison(&mut expression)?;
 
     let left = (*comparison.left).clone();
 
@@ -122,21 +148,15 @@ fn reverse_comparison(expr: &Expr, locator: &Locator, stylist: &Stylist) -> Resu
         _ => panic!("Expected comparison operator"),
     };
 
-    let mut state = CodegenState {
-        default_newline: &stylist.line_ending(),
-        default_indent: stylist.indentation(),
-        ..CodegenState::default()
-    };
-    expression.codegen(&mut state);
-    Ok(state.to_string())
+    Ok(expression.codegen_stylist(stylist))
 }
 
 /// SIM300
-pub fn yoda_conditions(
+pub(crate) fn yoda_conditions(
     checker: &mut Checker,
     expr: &Expr,
     left: &Expr,
-    ops: &[Cmpop],
+    ops: &[CmpOp],
     comparators: &[Expr],
 ) {
     let ([op], [right]) = (ops, comparators) else {
@@ -145,7 +165,7 @@ pub fn yoda_conditions(
 
     if !matches!(
         op,
-        Cmpop::Eq | Cmpop::NotEq | Cmpop::Lt | Cmpop::LtE | Cmpop::Gt | Cmpop::GtE,
+        CmpOp::Eq | CmpOp::NotEq | CmpOp::Lt | CmpOp::LtE | CmpOp::Gt | CmpOp::GtE,
     ) {
         return;
     }
@@ -159,20 +179,19 @@ pub fn yoda_conditions(
             YodaConditions {
                 suggestion: Some(suggestion.to_string()),
             },
-            Range::from(expr),
+            expr.range(),
         );
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.set_fix(Edit::replacement(
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
                 suggestion,
-                expr.location,
-                expr.end_location.unwrap(),
-            ));
+                expr.range(),
+            )));
         }
         checker.diagnostics.push(diagnostic);
     } else {
         checker.diagnostics.push(Diagnostic::new(
             YodaConditions { suggestion: None },
-            Range::from(expr),
+            expr.range(),
         ));
     }
 }

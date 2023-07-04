@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Excepthandler, ExcepthandlerKind, Expr, ExprContext, ExprKind};
+use rustpython_parser::ast::{self, ExceptHandler, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 
@@ -30,7 +29,7 @@ use crate::rules::tryceratops::helpers::LoggerCandidateVisitor;
 /// try:
 ///     ...
 /// except ValueError as e:
-///     logger.exception(f"Found an error")
+///     logger.exception("Found an error")
 /// ```
 #[violation]
 pub struct VerboseLogMessage;
@@ -44,61 +43,53 @@ impl Violation for VerboseLogMessage {
 
 #[derive(Default)]
 struct NameVisitor<'a> {
-    names: Vec<(&'a str, &'a Expr)>,
+    names: Vec<&'a ast::ExprName>,
 }
 
-impl<'a, 'b> Visitor<'b> for NameVisitor<'a>
-where
-    'b: 'a,
-{
-    fn visit_expr(&mut self, expr: &'b Expr) {
-        match &expr.node {
-            ExprKind::Name {
-                id,
-                ctx: ExprContext::Load,
-            } => self.names.push((id, expr)),
-            ExprKind::Attribute { .. } => {}
+impl<'a> Visitor<'a> for NameVisitor<'a> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Name(name) if name.ctx.is_load() => self.names.push(name),
+            Expr::Attribute(_) => {}
             _ => visitor::walk_expr(self, expr),
         }
     }
 }
 
 /// TRY401
-pub fn verbose_log_message(checker: &mut Checker, handlers: &[Excepthandler]) {
+pub(crate) fn verbose_log_message(checker: &mut Checker, handlers: &[ExceptHandler]) {
     for handler in handlers {
-        let ExcepthandlerKind::ExceptHandler { name, body, .. } = &handler.node;
+        let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler { name, body, .. }) =
+            handler;
         let Some(target) = name else {
             continue;
         };
 
         // Find all calls to `logging.exception`.
         let calls = {
-            let mut visitor = LoggerCandidateVisitor::new(&checker.ctx);
+            let mut visitor = LoggerCandidateVisitor::new(checker.semantic());
             visitor.visit_body(body);
             visitor.calls
         };
 
-        for (expr, func) in calls {
-            let ExprKind::Call { args, .. } = &expr.node else {
-                continue;
-            };
-            if let ExprKind::Attribute { attr, .. } = &func.node {
+        for expr in calls {
+            if let Expr::Attribute(ast::ExprAttribute { attr, .. }) = expr.func.as_ref() {
                 if attr == "exception" {
                     // Collect all referenced names in the `logging.exception` call.
-                    let names: Vec<(&str, &Expr)> = {
+                    let names: Vec<&ast::ExprName> = {
                         let mut names = Vec::new();
-                        for arg in args {
+                        for arg in &expr.args {
                             let mut visitor = NameVisitor::default();
                             visitor.visit_expr(arg);
                             names.extend(visitor.names);
                         }
                         names
                     };
-                    for (id, expr) in names {
-                        if id == target {
+                    for expr in names {
+                        if expr.id == target.as_str() {
                             checker
                                 .diagnostics
-                                .push(Diagnostic::new(VerboseLogMessage, Range::from(expr)));
+                                .push(Diagnostic::new(VerboseLogMessage, expr.range()));
                         }
                     }
                 }

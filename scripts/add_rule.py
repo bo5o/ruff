@@ -9,8 +9,10 @@ Example usage:
         --code 807 \
         --linter flake8-pie
 """
+from __future__ import annotations
 
 import argparse
+import subprocess
 
 from _utils import ROOT_DIR, dir_name, get_indent, pascal_case, snake_case
 
@@ -45,13 +47,7 @@ def main(*, name: str, prefix: str, code: str, linter: str) -> None:
                 indent = get_indent(line)
                 filestem = f"{prefix}{code}" if linter != "pylint" else snake_case(name)
                 lines.append(
-                    f'{indent}#[test_case(Rule::{name}, Path::new("{filestem}.py");'
-                    f' "{prefix}{code}")]',
-                )
-                lines.sort(
-                    key=lambda line: line.split('Path::new("')[1]
-                    if linter != "pylint"
-                    else line.split(");")[1],
+                    f'{indent}#[test_case(Rule::{name}, Path::new("{filestem}.py"))]',
                 )
                 fp.write("\n".join(lines))
                 fp.write("\n")
@@ -75,21 +71,14 @@ def main(*, name: str, prefix: str, code: str, linter: str) -> None:
     contents = rules_mod.read_text()
     parts = contents.split("\n\n")
 
-    new_pub_use = f"pub use {rule_name_snake}::{{{rule_name_snake}, {name}}}"
+    new_pub_use = f"pub(crate) use {rule_name_snake}::*"
     new_mod = f"mod {rule_name_snake};"
 
     if len(parts) == 2:
-        pub_use_contents = parts[0].split(";\n")
-        pub_use_contents.append(new_pub_use)
-        pub_use_contents.sort()
-
-        mod_contents = parts[1].splitlines()
-        mod_contents.append(new_mod)
-        mod_contents.sort()
-
-        new_contents = ";\n".join(pub_use_contents)
+        new_contents = parts[0]
+        new_contents += "\n" + new_pub_use + ";"
         new_contents += "\n\n"
-        new_contents += "\n".join(mod_contents)
+        new_contents += parts[1] + new_mod
         new_contents += "\n"
 
         rules_mod.write_text(new_contents)
@@ -111,11 +100,11 @@ use crate::checkers::ast::Checker;
 
 #[violation]
 pub struct {name};
+
 impl Violation for {name} {{
     #[derive_message_formats]
     fn message(&self) -> String {{
-        todo!("implement message");
-        format!("TODO: write message")
+        format!("TODO: write message: {{}}", todo!("implement message"))
     }}
 }}
 """,
@@ -123,59 +112,9 @@ impl Violation for {name} {{
         fp.write(
             f"""
 /// {prefix}{code}
-pub fn {rule_name_snake}(checker: &mut Checker) {{}}
+pub(crate) fn {rule_name_snake}(checker: &mut Checker) {{}}
 """,
         )
-
-    # Add the relevant code-to-violation pair to `src/registry.rs`.
-    content = (ROOT_DIR / "crates/ruff/src/registry.rs").read_text()
-
-    seen_macro = False
-    has_written = False
-    has_seen_linter = False
-    with (ROOT_DIR / "crates/ruff/src/registry.rs").open("w") as fp:
-        lines = []
-        for line in content.splitlines():
-            if has_written:
-                fp.write(line)
-                fp.write("\n")
-                continue
-
-            if line.startswith("ruff_macros::register_rules!"):
-                seen_macro = True
-                fp.write(line)
-                fp.write("\n")
-                continue
-
-            if not seen_macro:
-                fp.write(line)
-                fp.write("\n")
-                continue
-
-            if line.strip() == f"// {linter}":
-                indent = get_indent(line)
-                lines.append(f"{indent}rules::{dir_name(linter)}::rules::{name},")
-                has_seen_linter = True
-                fp.write(line)
-                fp.write("\n")
-                continue
-
-            if not has_seen_linter:
-                fp.write(line)
-                fp.write("\n")
-                continue
-
-            if not line.strip().startswith("// "):
-                lines.append(line)
-            else:
-                lines.sort()
-                fp.write("\n".join(lines))
-                fp.write("\n")
-                fp.write(line)
-                fp.write("\n")
-                has_written = True
-
-    assert has_written
 
     text = ""
     with (ROOT_DIR / "crates/ruff/src/codes.rs").open("r") as fp:
@@ -187,19 +126,24 @@ pub fn {rule_name_snake}(checker: &mut Checker) {{}}
         while (line := next(fp)).strip() != "":
             lines.append(line)
 
-        linter_variant = pascal_case(linter)
+        variant = pascal_case(linter)
+        rule = f"""rules::{linter.split(" ")[0]}::rules::{name}"""
         lines.append(
-            " " * 8 + f"""({linter_variant}, "{code}") => Rule::{name},\n""",
+            " " * 8
+            + f"""({variant}, "{code}") => (RuleGroup::Unspecified, {rule}),\n""",
         )
         lines.sort()
-
         text += "".join(lines)
         text += "\n"
-
         text += fp.read()
-
     with (ROOT_DIR / "crates/ruff/src/codes.rs").open("w") as fp:
         fp.write(text)
+
+    _rustfmt(rules_mod)
+
+
+def _rustfmt(path: str) -> None:
+    subprocess.run(["rustfmt", path])
 
 
 if __name__ == "__main__":

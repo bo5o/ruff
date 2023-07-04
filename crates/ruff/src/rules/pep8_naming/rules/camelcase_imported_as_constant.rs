@@ -1,11 +1,11 @@
-use rustpython_parser::ast::{Alias, Stmt};
+use rustpython_parser::ast::{Alias, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_stdlib::str::{self};
 
 use crate::rules::pep8_naming::helpers;
+use crate::settings::types::IdentifierPattern;
 
 /// ## What it does
 /// Checks for `CamelCase` imports that are aliased to constant-style names.
@@ -32,8 +32,8 @@ use crate::rules::pep8_naming::helpers;
 /// [PEP 8]: https://peps.python.org/pep-0008/
 #[violation]
 pub struct CamelcaseImportedAsConstant {
-    pub name: String,
-    pub asname: String,
+    name: String,
+    asname: String,
 }
 
 impl Violation for CamelcaseImportedAsConstant {
@@ -45,15 +45,23 @@ impl Violation for CamelcaseImportedAsConstant {
 }
 
 /// N814
-pub fn camelcase_imported_as_constant(
+pub(crate) fn camelcase_imported_as_constant(
     name: &str,
     asname: &str,
     alias: &Alias,
     stmt: &Stmt,
+    ignore_names: &[IdentifierPattern],
 ) -> Option<Diagnostic> {
+    if ignore_names
+        .iter()
+        .any(|ignore_name| ignore_name.matches(name))
+    {
+        return None;
+    }
+
     if helpers::is_camelcase(name)
-        && !str::is_lower(asname)
-        && str::is_upper(asname)
+        && !str::is_cased_lowercase(asname)
+        && str::is_cased_uppercase(asname)
         && !helpers::is_acronym(name, asname)
     {
         let mut diagnostic = Diagnostic::new(
@@ -61,9 +69,9 @@ pub fn camelcase_imported_as_constant(
                 name: name.to_string(),
                 asname: asname.to_string(),
             },
-            Range::from(alias),
+            alias.range(),
         );
-        diagnostic.set_parent(stmt.location);
+        diagnostic.set_parent(stmt.start());
         return Some(diagnostic);
     }
     None

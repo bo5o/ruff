@@ -1,6 +1,9 @@
+use std::io::Write;
+
+use ruff_python_ast::source_code::SourceLocation;
+
 use crate::message::{Emitter, EmitterContext, Message};
 use crate::registry::AsRule;
-use std::io::Write;
 
 /// Generate error logging commands for Azure Pipelines format.
 /// See [documentation](https://learn.microsoft.com/en-us/azure/devops/pipelines/scripts/logging-commands?view=azure-devops&tabs=bash#logissue-log-an-error-or-warning)
@@ -15,12 +18,12 @@ impl Emitter for AzureEmitter {
         context: &EmitterContext,
     ) -> anyhow::Result<()> {
         for message in messages {
-            let (line, col) = if context.is_jupyter_notebook(message.filename()) {
+            let location = if context.is_jupyter_notebook(message.filename()) {
                 // We can't give a reasonable location for the structured formats,
                 // so we show one that's clearly a fallback
-                (1, 0)
+                SourceLocation::default()
             } else {
-                (message.location.row(), message.location.column())
+                message.compute_start_location()
             };
 
             writeln!(
@@ -28,6 +31,8 @@ impl Emitter for AzureEmitter {
                 "##vso[task.logissue type=error\
                         ;sourcepath={filename};linenumber={line};columnnumber={col};code={code};]{body}",
                 filename = message.filename(),
+                line = location.row,
+                col = location.column,
                 code = message.kind.rule().noqa_code(),
                 body = message.kind.body,
             )?;
@@ -39,9 +44,10 @@ impl Emitter for AzureEmitter {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+
     use crate::message::tests::{capture_emitter_output, create_messages};
     use crate::message::AzureEmitter;
-    use insta::assert_snapshot;
 
     #[test]
     fn output() {

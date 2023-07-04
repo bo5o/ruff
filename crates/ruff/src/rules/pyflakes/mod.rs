@@ -3,129 +3,141 @@ pub(crate) mod cformat;
 pub(crate) mod fixes;
 pub(crate) mod format;
 pub(crate) mod rules;
+pub mod settings;
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use anyhow::Result;
-
     use regex::Regex;
     use rustpython_parser::lexer::LexResult;
     use test_case::test_case;
-    use textwrap::dedent;
 
+    use ruff_diagnostics::Diagnostic;
     use ruff_python_ast::source_code::{Indexer, Locator, Stylist};
+    use ruff_textwrap::dedent;
 
     use crate::linter::{check_path, LinterResult};
     use crate::registry::{AsRule, Linter, Rule};
-    use crate::settings::flags;
-    use crate::test::test_path;
-    use crate::{assert_messages, directives, settings};
+    use crate::rules::pyflakes;
+    use crate::settings::{flags, Settings};
+    use crate::test::{test_path, test_snippet};
+    use crate::{assert_messages, directives};
 
-    #[test_case(Rule::UnusedImport, Path::new("F401_0.py"); "F401_0")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_1.py"); "F401_1")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_2.py"); "F401_2")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_3.py"); "F401_3")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_4.py"); "F401_4")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_5.py"); "F401_5")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_6.py"); "F401_6")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_7.py"); "F401_7")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_8.py"); "F401_8")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_9.py"); "F401_9")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_10.py"); "F401_10")]
-    #[test_case(Rule::UnusedImport, Path::new("F401_11.py"); "F401_11")]
-    #[test_case(Rule::ImportShadowedByLoopVar, Path::new("F402.py"); "F402")]
-    #[test_case(Rule::UndefinedLocalWithImportStar, Path::new("F403.py"); "F403")]
-    #[test_case(Rule::LateFutureImport, Path::new("F404.py"); "F404")]
-    #[test_case(Rule::UndefinedLocalWithImportStarUsage, Path::new("F405.py"); "F405")]
-    #[test_case(Rule::UndefinedLocalWithNestedImportStarUsage, Path::new("F406.py"); "F406")]
-    #[test_case(Rule::FutureFeatureNotDefined, Path::new("F407.py"); "F407")]
-    #[test_case(Rule::PercentFormatInvalidFormat, Path::new("F50x.py"); "F501")]
-    #[test_case(Rule::PercentFormatExpectedMapping, Path::new("F502.py"); "F502_1")]
-    #[test_case(Rule::PercentFormatExpectedMapping, Path::new("F50x.py"); "F502_0")]
-    #[test_case(Rule::PercentFormatExpectedSequence, Path::new("F503.py"); "F503_1")]
-    #[test_case(Rule::PercentFormatExpectedSequence, Path::new("F50x.py"); "F503_0")]
-    #[test_case(Rule::PercentFormatExtraNamedArguments, Path::new("F504.py"); "F504_1")]
-    #[test_case(Rule::PercentFormatExtraNamedArguments, Path::new("F50x.py"); "F504_0")]
-    #[test_case(Rule::PercentFormatMissingArgument, Path::new("F504.py"); "F505_1")]
-    #[test_case(Rule::PercentFormatMissingArgument, Path::new("F50x.py"); "F505_0")]
-    #[test_case(Rule::PercentFormatMixedPositionalAndNamed, Path::new("F50x.py"); "F506")]
-    #[test_case(Rule::PercentFormatPositionalCountMismatch, Path::new("F50x.py"); "F507")]
-    #[test_case(Rule::PercentFormatStarRequiresSequence, Path::new("F50x.py"); "F508")]
-    #[test_case(Rule::PercentFormatUnsupportedFormatCharacter, Path::new("F50x.py"); "F509")]
-    #[test_case(Rule::StringDotFormatInvalidFormat, Path::new("F521.py"); "F521")]
-    #[test_case(Rule::StringDotFormatExtraNamedArguments, Path::new("F522.py"); "F522")]
-    #[test_case(Rule::StringDotFormatExtraPositionalArguments, Path::new("F523.py"); "F523")]
-    #[test_case(Rule::StringDotFormatMissingArguments, Path::new("F524.py"); "F524")]
-    #[test_case(Rule::StringDotFormatMixingAutomatic, Path::new("F525.py"); "F525")]
-    #[test_case(Rule::FStringMissingPlaceholders, Path::new("F541.py"); "F541")]
-    #[test_case(Rule::MultiValueRepeatedKeyLiteral, Path::new("F601.py"); "F601")]
-    #[test_case(Rule::MultiValueRepeatedKeyVariable, Path::new("F602.py"); "F602")]
-    #[test_case(Rule::MultipleStarredExpressions, Path::new("F622.py"); "F622")]
-    #[test_case(Rule::AssertTuple, Path::new("F631.py"); "F631")]
-    #[test_case(Rule::IsLiteral, Path::new("F632.py"); "F632")]
-    #[test_case(Rule::InvalidPrintSyntax, Path::new("F633.py"); "F633")]
-    #[test_case(Rule::IfTuple, Path::new("F634.py"); "F634")]
-    #[test_case(Rule::BreakOutsideLoop, Path::new("F701.py"); "F701")]
-    #[test_case(Rule::ContinueOutsideLoop, Path::new("F702.py"); "F702")]
-    #[test_case(Rule::YieldOutsideFunction, Path::new("F704.py"); "F704")]
-    #[test_case(Rule::ReturnOutsideFunction, Path::new("F706.py"); "F706")]
-    #[test_case(Rule::DefaultExceptNotLast, Path::new("F707.py"); "F707")]
-    #[test_case(Rule::ForwardAnnotationSyntaxError, Path::new("F722.py"); "F722")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_0.py"); "F811_0")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_1.py"); "F811_1")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_2.py"); "F811_2")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_3.py"); "F811_3")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_4.py"); "F811_4")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_5.py"); "F811_5")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_6.py"); "F811_6")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_7.py"); "F811_7")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_8.py"); "F811_8")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_9.py"); "F811_9")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_10.py"); "F811_10")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_11.py"); "F811_11")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_12.py"); "F811_12")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_13.py"); "F811_13")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_14.py"); "F811_14")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_15.py"); "F811_15")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_16.py"); "F811_16")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_17.py"); "F811_17")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_18.py"); "F811_18")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_19.py"); "F811_19")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_20.py"); "F811_20")]
-    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_21.py"); "F811_21")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_0.py"); "F821_0")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_1.py"); "F821_1")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_2.py"); "F821_2")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_3.py"); "F821_3")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_4.py"); "F821_4")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_5.py"); "F821_5")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_6.py"); "F821_6")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_7.py"); "F821_7")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_8.pyi"); "F821_8")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_9.py"); "F821_9")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_10.py"); "F821_10")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_11.py"); "F821_11")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_12.py"); "F821_12")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_13.py"); "F821_13")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_14.py"); "F821_14")]
-    #[test_case(Rule::UndefinedName, Path::new("F821_15.py"); "F821_15")]
-    #[test_case(Rule::UndefinedExport, Path::new("F822_0.py"); "F822_0")]
-    #[test_case(Rule::UndefinedExport, Path::new("F822_1.py"); "F822_1")]
-    #[test_case(Rule::UndefinedExport, Path::new("F822_2.py"); "F822_2")]
-    #[test_case(Rule::UndefinedLocal, Path::new("F823.py"); "F823")]
-    #[test_case(Rule::UnusedVariable, Path::new("F841_0.py"); "F841_0")]
-    #[test_case(Rule::UnusedVariable, Path::new("F841_1.py"); "F841_1")]
-    #[test_case(Rule::UnusedVariable, Path::new("F841_2.py"); "F841_2")]
-    #[test_case(Rule::UnusedVariable, Path::new("F841_3.py"); "F841_3")]
-    #[test_case(Rule::UnusedAnnotation, Path::new("F842.py"); "F842")]
-    #[test_case(Rule::RaiseNotImplemented, Path::new("F901.py"); "F901")]
+    #[test_case(Rule::UnusedImport, Path::new("F401_0.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_1.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_2.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_3.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_4.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_5.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_6.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_7.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_8.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_9.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_10.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_11.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_12.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_13.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_14.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_15.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_16.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_17.py"))]
+    #[test_case(Rule::UnusedImport, Path::new("F401_18.py"))]
+    #[test_case(Rule::ImportShadowedByLoopVar, Path::new("F402.py"))]
+    #[test_case(Rule::UndefinedLocalWithImportStar, Path::new("F403.py"))]
+    #[test_case(Rule::LateFutureImport, Path::new("F404.py"))]
+    #[test_case(Rule::UndefinedLocalWithImportStarUsage, Path::new("F405.py"))]
+    #[test_case(Rule::UndefinedLocalWithNestedImportStarUsage, Path::new("F406.py"))]
+    #[test_case(Rule::FutureFeatureNotDefined, Path::new("F407.py"))]
+    #[test_case(Rule::PercentFormatInvalidFormat, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatExpectedMapping, Path::new("F502.py"))]
+    #[test_case(Rule::PercentFormatExpectedMapping, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatExpectedSequence, Path::new("F503.py"))]
+    #[test_case(Rule::PercentFormatExpectedSequence, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatExtraNamedArguments, Path::new("F504.py"))]
+    #[test_case(Rule::PercentFormatExtraNamedArguments, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatMissingArgument, Path::new("F504.py"))]
+    #[test_case(Rule::PercentFormatMissingArgument, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatMixedPositionalAndNamed, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatPositionalCountMismatch, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatStarRequiresSequence, Path::new("F50x.py"))]
+    #[test_case(Rule::PercentFormatUnsupportedFormatCharacter, Path::new("F50x.py"))]
+    #[test_case(Rule::StringDotFormatInvalidFormat, Path::new("F521.py"))]
+    #[test_case(Rule::StringDotFormatExtraNamedArguments, Path::new("F522.py"))]
+    #[test_case(Rule::StringDotFormatExtraPositionalArguments, Path::new("F523.py"))]
+    #[test_case(Rule::StringDotFormatMissingArguments, Path::new("F524.py"))]
+    #[test_case(Rule::StringDotFormatMixingAutomatic, Path::new("F525.py"))]
+    #[test_case(Rule::FStringMissingPlaceholders, Path::new("F541.py"))]
+    #[test_case(Rule::MultiValueRepeatedKeyLiteral, Path::new("F601.py"))]
+    #[test_case(Rule::MultiValueRepeatedKeyVariable, Path::new("F602.py"))]
+    #[test_case(Rule::MultipleStarredExpressions, Path::new("F622.py"))]
+    #[test_case(Rule::AssertTuple, Path::new("F631.py"))]
+    #[test_case(Rule::IsLiteral, Path::new("F632.py"))]
+    #[test_case(Rule::InvalidPrintSyntax, Path::new("F633.py"))]
+    #[test_case(Rule::IfTuple, Path::new("F634.py"))]
+    #[test_case(Rule::BreakOutsideLoop, Path::new("F701.py"))]
+    #[test_case(Rule::ContinueOutsideLoop, Path::new("F702.py"))]
+    #[test_case(Rule::YieldOutsideFunction, Path::new("F704.py"))]
+    #[test_case(Rule::ReturnOutsideFunction, Path::new("F706.py"))]
+    #[test_case(Rule::DefaultExceptNotLast, Path::new("F707.py"))]
+    #[test_case(Rule::ForwardAnnotationSyntaxError, Path::new("F722.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_0.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_1.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_2.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_3.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_4.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_5.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_6.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_7.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_8.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_9.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_10.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_11.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_12.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_13.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_14.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_15.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_16.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_17.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_18.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_19.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_20.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_21.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_22.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_23.py"))]
+    #[test_case(Rule::RedefinedWhileUnused, Path::new("F811_24.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_0.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_1.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_2.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_3.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_4.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_5.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_6.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_7.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_8.pyi"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_9.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_10.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_11.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_12.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_13.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_14.py"))]
+    #[test_case(Rule::UndefinedName, Path::new("F821_15.py"))]
+    #[test_case(Rule::UndefinedExport, Path::new("F822_0.py"))]
+    #[test_case(Rule::UndefinedExport, Path::new("F822_1.py"))]
+    #[test_case(Rule::UndefinedExport, Path::new("F822_2.py"))]
+    #[test_case(Rule::UndefinedLocal, Path::new("F823.py"))]
+    #[test_case(Rule::UnusedVariable, Path::new("F841_0.py"))]
+    #[test_case(Rule::UnusedVariable, Path::new("F841_1.py"))]
+    #[test_case(Rule::UnusedVariable, Path::new("F841_2.py"))]
+    #[test_case(Rule::UnusedVariable, Path::new("F841_3.py"))]
+    #[test_case(Rule::UnusedAnnotation, Path::new("F842.py"))]
+    #[test_case(Rule::RaiseNotImplemented, Path::new("F901.py"))]
     fn rules(rule_code: Rule, path: &Path) -> Result<()> {
         let snapshot = format!("{}_{}", rule_code.noqa_code(), path.to_string_lossy());
         let diagnostics = test_path(
             Path::new("pyflakes").join(path).as_path(),
-            &settings::Settings::for_rule(rule_code),
+            &Settings::for_rule(rule_code),
         )?;
         assert_messages!(snapshot, diagnostics);
         Ok(())
@@ -135,9 +147,9 @@ mod tests {
     fn f841_dummy_variable_rgx() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/F841_0.py"),
-            &settings::Settings {
+            &Settings {
                 dummy_variable_rgx: Regex::new(r"^z$").unwrap(),
-                ..settings::Settings::for_rule(Rule::UnusedVariable)
+                ..Settings::for_rule(Rule::UnusedVariable)
             },
         )?;
         assert_messages!(diagnostics);
@@ -148,7 +160,7 @@ mod tests {
     fn init() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/__init__.py"),
-            &settings::Settings::for_rules(vec![Rule::UndefinedName, Rule::UndefinedExport]),
+            &Settings::for_rules(vec![Rule::UndefinedName, Rule::UndefinedExport]),
         )?;
         assert_messages!(diagnostics);
         Ok(())
@@ -158,7 +170,7 @@ mod tests {
     fn default_builtins() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/builtins.py"),
-            &settings::Settings::for_rules(vec![Rule::UndefinedName]),
+            &Settings::for_rules(vec![Rule::UndefinedName]),
         )?;
         assert_messages!(diagnostics);
         Ok(())
@@ -168,9 +180,9 @@ mod tests {
     fn extra_builtins() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/builtins.py"),
-            &settings::Settings {
+            &Settings {
                 builtins: vec!["_".to_string()],
-                ..settings::Settings::for_rules(vec![Rule::UndefinedName])
+                ..Settings::for_rules(vec![Rule::UndefinedName])
             },
         )?;
         assert_messages!(diagnostics);
@@ -181,7 +193,7 @@ mod tests {
     fn default_typing_modules() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/typing_modules.py"),
-            &settings::Settings::for_rules(vec![Rule::UndefinedName]),
+            &Settings::for_rules(vec![Rule::UndefinedName]),
         )?;
         assert_messages!(diagnostics);
         Ok(())
@@ -191,9 +203,9 @@ mod tests {
     fn extra_typing_modules() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/typing_modules.py"),
-            &settings::Settings {
+            &Settings {
                 typing_modules: vec!["airflow.typing_compat".to_string()],
-                ..settings::Settings::for_rules(vec![Rule::UndefinedName])
+                ..Settings::for_rules(vec![Rule::UndefinedName])
             },
         )?;
         assert_messages!(diagnostics);
@@ -204,7 +216,7 @@ mod tests {
     fn future_annotations() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/future_annotations.py"),
-            &settings::Settings::for_rules(vec![Rule::UnusedImport, Rule::UndefinedName]),
+            &Settings::for_rules(vec![Rule::UnusedImport, Rule::UndefinedName]),
         )?;
         assert_messages!(diagnostics);
         Ok(())
@@ -214,7 +226,7 @@ mod tests {
     fn multi_statement_lines() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/multi_statement_lines.py"),
-            &settings::Settings::for_rule(Rule::UnusedImport),
+            &Settings::for_rule(Rule::UnusedImport),
         )?;
         assert_messages!(diagnostics);
         Ok(())
@@ -224,9 +236,9 @@ mod tests {
     fn relative_typing_module() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/project/foo/bar.py"),
-            &settings::Settings {
+            &Settings {
                 typing_modules: vec!["foo.typical".to_string()],
-                ..settings::Settings::for_rules(vec![Rule::UndefinedName])
+                ..Settings::for_rules(vec![Rule::UndefinedName])
             },
         )?;
         assert_messages!(diagnostics);
@@ -237,33 +249,272 @@ mod tests {
     fn nested_relative_typing_module() -> Result<()> {
         let diagnostics = test_path(
             Path::new("pyflakes/project/foo/bop/baz.py"),
-            &settings::Settings {
+            &Settings {
                 typing_modules: vec!["foo.typical".to_string()],
-                ..settings::Settings::for_rules(vec![Rule::UndefinedName])
+                ..Settings::for_rules(vec![Rule::UndefinedName])
             },
         )?;
         assert_messages!(diagnostics);
         Ok(())
     }
 
+    #[test]
+    fn extend_generics() -> Result<()> {
+        let snapshot = "extend_immutable_calls".to_string();
+        let diagnostics = test_path(
+            Path::new("pyflakes/F401_15.py"),
+            &Settings {
+                pyflakes: pyflakes::settings::Settings {
+                    extend_generics: vec!["django.db.models.ForeignKey".to_string()],
+                },
+                ..Settings::for_rules(vec![Rule::UnusedImport])
+            },
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
+    #[test_case(
+        r#"
+        import os
+
+        def f():
+            import os
+
+            # Despite this `del`, `import os` in `f` should still be flagged as shadowing an unused
+            # import.
+            del os
+    "#,
+        "del_shadowed_global_import_in_local_scope"
+    )]
+    #[test_case(
+        r#"
+        import os
+
+        def f():
+            import os
+
+        # Despite this `del`, `import os` in `f` should still be flagged as shadowing an unused
+        # import. (This is a false negative, but is consistent with Pyflakes.)
+        del os
+    "#,
+        "del_shadowed_global_import_in_global_scope"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            import os
+            import os
+
+            # Despite this `del`, `import os` should still be flagged as shadowing an unused
+            # import.
+            del os
+    "#,
+        "del_shadowed_local_import_in_local_scope"
+    )]
+    #[test_case(
+        r#"
+        import os
+
+        def f():
+            os = 1
+            print(os)
+
+            del os
+
+            def g():
+                # `import os` doesn't need to be flagged as shadowing an import.
+                os = 1
+                print(os)
+        "#,
+        "del_shadowed_import_shadow_in_local_scope"
+    )]
+    #[test_case(
+        r#"
+        x = 1
+
+        def foo():
+            x = 2
+            del x
+            # Flake8 treats this as an F823 error, because it removes the binding
+            # entirely after the `del` statement. However, it should be an F821
+            # error, because the name is defined in the scope, but unbound.
+            x += 1
+    "#,
+        "augmented_assignment_after_del"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            x = 1
+
+            try:
+                1 / 0
+            except Exception as x:
+                pass
+
+            # No error here, though it should arguably be an F821 error. `x` will
+            # be unbound after the `except` block (assuming an exception is raised
+            # and caught).
+            print(x)
+            "#,
+        "print_in_body_after_shadowing_except"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            x = 1
+
+            try:
+                1 / 0
+            except ValueError as x:
+                pass
+            except ImportError as x:
+                pass
+
+            # No error here, though it should arguably be an F821 error. `x` will
+            # be unbound after the `except` block (assuming an exception is raised
+            # and caught).
+            print(x)
+            "#,
+        "print_in_body_after_double_shadowing_except"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            try:
+                x = 3
+            except ImportError as x:
+                print(x)
+            else:
+                print(x)
+            "#,
+        "print_in_try_else_after_shadowing_except"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            list = [1, 2, 3]
+
+            for e in list:
+                if e % 2 == 0:
+                    try:
+                        pass
+                    except Exception as e:
+                        print(e)
+                else:
+                    print(e)
+            "#,
+        "print_in_if_else_after_shadowing_except"
+    )]
+    #[test_case(
+        r#"
+        def f():
+            x = 1
+            del x
+            del x
+            "#,
+        "double_del"
+    )]
+    #[test_case(
+        r#"
+        x = 1
+
+        def f():
+            try:
+                pass
+            except ValueError as x:
+                pass
+
+            # This should resolve to the `x` in `x = 1`.
+            print(x)
+            "#,
+        "load_after_unbind_from_module_scope"
+    )]
+    #[test_case(
+        r#"
+        x = 1
+
+        def f():
+            try:
+                pass
+            except ValueError as x:
+                pass
+
+            try:
+                pass
+            except ValueError as x:
+                pass
+
+            # This should resolve to the `x` in `x = 1`.
+            print(x)
+            "#,
+        "load_after_multiple_unbinds_from_module_scope"
+    )]
+    #[test_case(
+        r#"
+        x = 1
+
+        def f():
+            try:
+                pass
+            except ValueError as x:
+                pass
+
+            def g():
+                try:
+                    pass
+                except ValueError as x:
+                    pass
+
+                # This should resolve to the `x` in `x = 1`.
+                print(x)
+            "#,
+        "load_after_unbind_from_nested_module_scope"
+    )]
+    #[test_case(
+        r#"
+        class C:
+            x = 1
+
+            def f():
+                try:
+                    pass
+                except ValueError as x:
+                    pass
+
+                # This should raise an F821 error, rather than resolving to the
+                # `x` in `x = 1`.
+                print(x)
+            "#,
+        "load_after_unbind_from_class_scope"
+    )]
+    fn contents(contents: &str, snapshot: &str) {
+        let diagnostics = test_snippet(contents, &Settings::for_rules(Linter::Pyflakes.rules()));
+        assert_messages!(snapshot, diagnostics);
+    }
+
     /// A re-implementation of the Pyflakes test runner.
     /// Note that all tests marked with `#[ignore]` should be considered TODOs.
     fn flakes(contents: &str, expected: &[Rule]) {
         let contents = dedent(contents);
-        let settings = settings::Settings::for_rules(&Linter::Pyflakes);
+        let settings = Settings::for_rules(Linter::Pyflakes.rules());
         let tokens: Vec<LexResult> = ruff_rustpython::tokenize(&contents);
         let locator = Locator::new(&contents);
         let stylist = Stylist::from_tokens(&tokens, &locator);
-        let indexer: Indexer = tokens.as_slice().into();
-        let directives =
-            directives::extract_directives(&tokens, directives::Flags::from_settings(&settings));
+        let indexer = Indexer::from_tokens(&tokens, &locator);
+        let directives = directives::extract_directives(
+            &tokens,
+            directives::Flags::from_settings(&settings),
+            &locator,
+            &indexer,
+        );
         let LinterResult {
-            data: (mut diagnostics, _imports),
+            data: (mut diagnostics, ..),
             ..
         } = check_path(
             Path::new("<filename>"),
             None,
-            &contents,
             tokens,
             &locator,
             &stylist,
@@ -271,9 +522,9 @@ mod tests {
             &directives,
             &settings,
             flags::Noqa::Enabled,
-            flags::Autofix::Enabled,
+            None,
         );
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Diagnostic::start);
         let actual = diagnostics
             .iter()
             .map(|diagnostic| diagnostic.kind.rule())
@@ -465,6 +716,16 @@ mod tests {
                 __qualname__
         "#,
             &[Rule::UndefinedName],
+        );
+        flakes(
+            r#"
+        def f():
+            __qualname__ = 1
+
+            class Foo:
+                __qualname__
+        "#,
+            &[Rule::UnusedVariable],
         );
     }
 
@@ -1026,6 +1287,23 @@ mod tests {
         "#,
             &[],
         );
+
+        flakes(
+            r#"
+        class A:
+            T = 1
+
+            # In each case, `T` is undefined. Only the first `iter` uses the class scope.
+            X = (T for x in range(10))
+            Y = [x for x in range(10) if T]
+            Z = [x for x in range(10) for y in T]
+        "#,
+            &[
+                Rule::UndefinedName,
+                Rule::UndefinedName,
+                Rule::UndefinedName,
+            ],
+        );
     }
 
     #[test]
@@ -1126,6 +1404,40 @@ mod tests {
         t = Test()
         "#,
             &[],
+        );
+        flakes(
+            r#"
+        class Test(object):
+            print(__class__.__name__)
+
+            def __init__(self):
+                self.x = 1
+
+        t = Test()
+        "#,
+            &[Rule::UndefinedName],
+        );
+        flakes(
+            r#"
+        class Test(object):
+            X = [__class__ for _ in range(10)]
+
+            def __init__(self):
+                self.x = 1
+
+        t = Test()
+        "#,
+            &[Rule::UndefinedName],
+        );
+        flakes(
+            r#"
+        def f(self):
+            print(__class__.__name__)
+            self.x = 1
+
+        f()
+        "#,
+            &[Rule::UndefinedName],
         );
     }
 
@@ -1802,7 +2114,7 @@ mod tests {
         try: pass
         except Exception as fu: pass
         "#,
-            &[Rule::RedefinedWhileUnused, Rule::UnusedVariable],
+            &[Rule::UnusedVariable, Rule::RedefinedWhileUnused],
         );
     }
 
@@ -3012,6 +3324,20 @@ mod tests {
         T: object
         def g(t: 'T'): pass
         "#,
+            &[Rule::UndefinedName],
+        );
+        flakes(
+            r#"
+        T = object
+        def f(t: T): pass
+        "#,
+            &[],
+        );
+        flakes(
+            r#"
+        T = object
+        def g(t: 'T'): pass
+        "#,
             &[],
         );
         flakes(
@@ -3200,6 +3526,16 @@ mod tests {
             r#"
         from __future__ import annotations
         T: object
+        def f(t: T): pass
+        def g(t: 'T'): pass
+        "#,
+            &[Rule::UndefinedName, Rule::UndefinedName],
+        );
+
+        flakes(
+            r#"
+        from __future__ import annotations
+        T = object
         def f(t: T): pass
         def g(t: 'T'): pass
         "#,
@@ -3619,6 +3955,16 @@ mod tests {
             TypeVar("A", bound=A["B"])
             TypeVar("A", A["D"])
             cast(A["E"], [])
+        "#,
+            &[],
+        );
+        flakes(
+            r#"
+            from typing import NewType
+
+            def f():
+                name = "x"
+                NewType(name, int)
         "#,
             &[],
         );

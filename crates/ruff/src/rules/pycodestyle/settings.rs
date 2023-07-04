@@ -1,14 +1,16 @@
 //! Settings for the `pycodestyle` plugin.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use ruff_macros::{CacheKey, ConfigurationOptions};
+use ruff_macros::{CacheKey, CombineOptions, ConfigurationOptions};
+
+use crate::line_width::LineLength;
 
 #[derive(
-    Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions, JsonSchema,
+    Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions, CombineOptions,
 )]
 #[serde(deny_unknown_fields, rename_all = "kebab-case", rename = "Pycodestyle")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Options {
     #[option(
         default = "None",
@@ -19,7 +21,7 @@ pub struct Options {
     )]
     /// The maximum line length to allow for line-length violations within
     /// documentation (`W505`), including standalone comments.
-    pub max_doc_length: Option<usize>,
+    pub max_doc_length: Option<LineLength>,
     #[option(
         default = "false",
         value_type = "bool",
@@ -35,7 +37,7 @@ pub struct Options {
 
 #[derive(Debug, Default, CacheKey)]
 pub struct Settings {
-    pub max_doc_length: Option<usize>,
+    pub max_doc_length: Option<LineLength>,
     pub ignore_overlong_task_comments: bool,
 }
 

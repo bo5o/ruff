@@ -1,14 +1,77 @@
-use rustpython_parser::ast::{ExcepthandlerKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, ExceptHandler, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::identifier_range;
-use ruff_python_ast::source_code::Locator;
+use ruff_python_ast::identifier::Identifier;
 
+/// ## What it does
+/// Checks for functions or methods with too many branches.
+///
+/// By default, this rule allows up to 12 branches. This can be configured
+/// using the `max-branches` option.
+///
+/// ## Why is this bad?
+/// Functions or methods with many branches are harder to understand
+/// and maintain than functions or methods with fewer branches.
+///
+/// ## Example
+/// ```python
+/// def capital(country):
+///     if country == "Australia":
+///         return "Canberra"
+///     elif country == "Brazil":
+///         return "Brasilia"
+///     elif country == "Canada":
+///         return "Ottawa"
+///     elif country == "England":
+///         return "London"
+///     elif country == "France":
+///         return "Paris"
+///     elif country == "Germany":
+///         return "Berlin"
+///     elif country == "Poland":
+///         return "Warsaw"
+///     elif country == "Romania":
+///         return "Bucharest"
+///     elif country == "Spain":
+///         return "Madrid"
+///     elif country == "Thailand":
+///         return "Bangkok"
+///     elif country == "Turkey":
+///         return "Ankara"
+///     elif country == "United States":
+///         return "Washington"
+///     else:
+///         return "Unknown"  # 13th branch
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def capital(country):
+///     capitals = {
+///         "Australia": "Canberra",
+///         "Brazil": "Brasilia",
+///         "Canada": "Ottawa",
+///         "England": "London",
+///         "France": "Paris",
+///         "Germany": "Berlin",
+///         "Poland": "Warsaw",
+///         "Romania": "Bucharest",
+///         "Spain": "Madrid",
+///         "Thailand": "Bangkok",
+///         "Turkey": "Ankara",
+///         "United States": "Washington",
+///     }
+///     city = capitals.get(country, "Unknown")
+///     return city
+/// ```
+///
+/// ## References
+/// - [Ruff configuration documentation](https://beta.ruff.rs/docs/settings/#max-branches)
 #[violation]
 pub struct TooManyBranches {
-    pub branches: usize,
-    pub max_branches: usize,
+    branches: usize,
+    max_branches: usize,
 }
 
 impl Violation for TooManyBranches {
@@ -26,27 +89,27 @@ fn num_branches(stmts: &[Stmt]) -> usize {
     stmts
         .iter()
         .map(|stmt| {
-            match &stmt.node {
-                StmtKind::If { body, orelse, .. } => {
+            match stmt {
+                Stmt::If(ast::StmtIf { body, orelse, .. }) => {
                     1 + num_branches(body)
                         + (if let Some(stmt) = orelse.first() {
                             // `elif:` and `else: if:` have the same AST representation.
                             // Avoid treating `elif:` as two statements.
-                            usize::from(!matches!(stmt.node, StmtKind::If { .. }))
+                            usize::from(!stmt.is_if_stmt())
                         } else {
                             0
                         })
                         + num_branches(orelse)
                 }
-                StmtKind::Match { cases, .. } => {
+                Stmt::Match(ast::StmtMatch { cases, .. }) => {
                     1 + cases
                         .iter()
                         .map(|case| num_branches(&case.body))
                         .sum::<usize>()
                 }
-                StmtKind::For { body, orelse, .. }
-                | StmtKind::AsyncFor { body, orelse, .. }
-                | StmtKind::While { body, orelse, .. } => {
+                Stmt::For(ast::StmtFor { body, orelse, .. })
+                | Stmt::AsyncFor(ast::StmtAsyncFor { body, orelse, .. })
+                | Stmt::While(ast::StmtWhile { body, orelse, .. }) => {
                     1 + num_branches(body)
                         + (if orelse.is_empty() {
                             0
@@ -54,18 +117,20 @@ fn num_branches(stmts: &[Stmt]) -> usize {
                             1 + num_branches(orelse)
                         })
                 }
-                StmtKind::Try {
+                Stmt::Try(ast::StmtTry {
                     body,
                     handlers,
                     orelse,
                     finalbody,
-                }
-                | StmtKind::TryStar {
+                    range: _,
+                })
+                | Stmt::TryStar(ast::StmtTryStar {
                     body,
                     handlers,
                     orelse,
                     finalbody,
-                } => {
+                    range: _,
+                }) => {
                     1 + num_branches(body)
                         + (if orelse.is_empty() {
                             0
@@ -81,8 +146,9 @@ fn num_branches(stmts: &[Stmt]) -> usize {
                             .iter()
                             .map(|handler| {
                                 1 + {
-                                    let ExcepthandlerKind::ExceptHandler { body, .. } =
-                                        &handler.node;
+                                    let ExceptHandler::ExceptHandler(
+                                        ast::ExceptHandlerExceptHandler { body, .. },
+                                    ) = handler;
                                     num_branches(body)
                                 }
                             })
@@ -95,11 +161,10 @@ fn num_branches(stmts: &[Stmt]) -> usize {
 }
 
 /// PLR0912
-pub fn too_many_branches(
+pub(crate) fn too_many_branches(
     stmt: &Stmt,
     body: &[Stmt],
     max_branches: usize,
-    locator: &Locator,
 ) -> Option<Diagnostic> {
     let branches = num_branches(body);
     if branches > max_branches {
@@ -108,7 +173,7 @@ pub fn too_many_branches(
                 branches,
                 max_branches,
             },
-            identifier_range(stmt, locator),
+            stmt.identifier(),
         ))
     } else {
         None
@@ -118,12 +183,13 @@ pub fn too_many_branches(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use rustpython_parser as parser;
+    use rustpython_parser::ast::Suite;
+    use rustpython_parser::Parse;
 
     use super::num_branches;
 
     fn test_helper(source: &str, expected_num_branches: usize) -> Result<()> {
-        let branches = parser::parse_program(source, "<filename>")?;
+        let branches = Suite::parse(source, "<filename>")?;
         assert_eq!(num_branches(&branches), expected_num_branches);
         Ok(())
     }

@@ -1,10 +1,13 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+use ruff_text_size::TextRange;
+
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_stdlib::identifiers::{is_migration_name, is_module_name};
+
+use crate::settings::types::IdentifierPattern;
 
 /// ## What it does
 /// Checks for module names that do not follow the `snake_case` naming
@@ -33,7 +36,7 @@ use ruff_python_stdlib::identifiers::{is_migration_name, is_module_name};
 /// [PEP 8]: https://peps.python.org/pep-0008/#package-and-module-names
 #[violation]
 pub struct InvalidModuleName {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for InvalidModuleName {
@@ -45,7 +48,11 @@ impl Violation for InvalidModuleName {
 }
 
 /// N999
-pub fn invalid_module_name(path: &Path, package: Option<&Path>) -> Option<Diagnostic> {
+pub(crate) fn invalid_module_name(
+    path: &Path,
+    package: Option<&Path>,
+    ignore_names: &[IdentifierPattern],
+) -> Option<Diagnostic> {
     if !path
         .extension()
         .map_or(false, |ext| ext == "py" || ext == "pyi")
@@ -60,6 +67,13 @@ pub fn invalid_module_name(path: &Path, package: Option<&Path>) -> Option<Diagno
             path.file_stem().unwrap().to_string_lossy()
         };
 
+        if ignore_names
+            .iter()
+            .any(|ignore_name| ignore_name.matches(&module_name))
+        {
+            return None;
+        }
+
         // As a special case, we allow files in `versions` and `migrations` directories to start
         // with a digit (e.g., `0001_initial.py`), to support common conventions used by Django
         // and other frameworks.
@@ -73,7 +87,7 @@ pub fn invalid_module_name(path: &Path, package: Option<&Path>) -> Option<Diagno
                 InvalidModuleName {
                     name: module_name.to_string(),
                 },
-                Range::default(),
+                TextRange::default(),
             ));
         }
     }

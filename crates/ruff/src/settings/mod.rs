@@ -17,16 +17,17 @@ use crate::registry::{Rule, RuleNamespace, RuleSet, INCOMPATIBLE_CODES};
 use crate::rule_selector::{RuleSelector, Specificity};
 use crate::rules::{
     flake8_annotations, flake8_bandit, flake8_bugbear, flake8_builtins, flake8_comprehensions,
-    flake8_errmsg, flake8_gettext, flake8_implicit_str_concat, flake8_import_conventions,
-    flake8_pytest_style, flake8_quotes, flake8_self, flake8_tidy_imports, flake8_type_checking,
-    flake8_unused_arguments, isort, mccabe, pep8_naming, pycodestyle, pydocstyle, pylint,
-    pyupgrade, wemake_python_styleguide,
+    flake8_copyright, flake8_errmsg, flake8_gettext, flake8_implicit_str_concat,
+    flake8_import_conventions, flake8_pytest_style, flake8_quotes, flake8_self,
+    flake8_tidy_imports, flake8_type_checking, flake8_unused_arguments, isort, mccabe, pep8_naming,
+    pycodestyle, pydocstyle, pyflakes, pylint, pyupgrade, wemake_python_styleguide,
 };
 use crate::settings::configuration::Configuration;
 use crate::settings::types::{FilePatternSet, PerFileIgnore, PythonVersion, SerializationFormat};
 use crate::warn_user_once_by_id;
 
 use self::rule_table::RuleTable;
+use super::line_width::{LineLength, TabSize};
 
 pub mod configuration;
 pub mod defaults;
@@ -39,7 +40,7 @@ pub mod types;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AllSettings {
     pub cli: CliSettings,
     pub lib: Settings,
@@ -57,7 +58,7 @@ impl AllSettings {
                 fix_only: config.fix_only.unwrap_or(false),
                 format: config.format.unwrap_or_default(),
                 show_fixes: config.show_fixes.unwrap_or(false),
-                update_check: config.update_check.unwrap_or_default(),
+                show_source: config.show_source.unwrap_or(false),
             },
             lib: Settings::from_configuration(config, project_root)?,
         })
@@ -66,15 +67,14 @@ impl AllSettings {
 
 #[derive(Debug, Default, Clone)]
 #[allow(clippy::struct_excessive_bools)]
-/// Settings that are not used by this library and
-/// only here so that `ruff_cli` can use them.
+/// Settings that are not used by this library and only here so that `ruff_cli` can use them.
 pub struct CliSettings {
     pub cache_dir: PathBuf,
     pub fix: bool,
     pub fix_only: bool,
     pub format: SerializationFormat,
     pub show_fixes: bool,
-    pub update_check: bool,
+    pub show_source: bool,
 }
 
 #[derive(Debug, CacheKey)]
@@ -83,7 +83,6 @@ pub struct Settings {
     pub rules: RuleTable,
     pub per_file_ignores: Vec<(GlobMatcher, GlobMatcher, RuleSet)>,
 
-    pub show_source: bool,
     pub target_version: PythonVersion,
 
     // Resolver settings
@@ -101,7 +100,8 @@ pub struct Settings {
     pub dummy_variable_rgx: Regex,
     pub external: FxHashSet<String>,
     pub ignore_init_module_imports: bool,
-    pub line_length: usize,
+    pub line_length: LineLength,
+    pub tab_size: TabSize,
     pub namespace_packages: Vec<PathBuf>,
     pub src: Vec<PathBuf>,
     pub task_tags: Vec<String>,
@@ -112,14 +112,15 @@ pub struct Settings {
     pub flake8_bugbear: flake8_bugbear::settings::Settings,
     pub flake8_builtins: flake8_builtins::settings::Settings,
     pub flake8_comprehensions: flake8_comprehensions::settings::Settings,
+    pub flake8_copyright: flake8_copyright::settings::Settings,
     pub flake8_errmsg: flake8_errmsg::settings::Settings,
+    pub flake8_gettext: flake8_gettext::settings::Settings,
     pub flake8_implicit_str_concat: flake8_implicit_str_concat::settings::Settings,
     pub flake8_import_conventions: flake8_import_conventions::settings::Settings,
-    pub flake8_gettext: flake8_gettext::settings::Settings,
     pub flake8_pytest_style: flake8_pytest_style::settings::Settings,
     pub flake8_quotes: flake8_quotes::settings::Settings,
     pub flake8_self: flake8_self::settings::Settings,
-    pub flake8_tidy_imports: flake8_tidy_imports::Settings,
+    pub flake8_tidy_imports: flake8_tidy_imports::settings::Settings,
     pub flake8_type_checking: flake8_type_checking::settings::Settings,
     pub flake8_unused_arguments: flake8_unused_arguments::settings::Settings,
     pub isort: isort::settings::Settings,
@@ -127,6 +128,7 @@ pub struct Settings {
     pub pep8_naming: pep8_naming::settings::Settings,
     pub pycodestyle: pycodestyle::settings::Settings,
     pub pydocstyle: pydocstyle::settings::Settings,
+    pub pyflakes: pyflakes::settings::Settings,
     pub pylint: pylint::settings::Settings,
     pub pyupgrade: pyupgrade::settings::Settings,
     pub wemake_python_styleguide: wemake_python_styleguide::settings::Settings,
@@ -165,13 +167,18 @@ impl Settings {
                 config.include.unwrap_or_else(|| defaults::INCLUDE.clone()),
             )?,
             ignore_init_module_imports: config.ignore_init_module_imports.unwrap_or_default(),
-            line_length: config.line_length.unwrap_or(defaults::LINE_LENGTH),
+            line_length: config.line_length.unwrap_or_default(),
+            tab_size: config.tab_size.unwrap_or_default(),
             namespace_packages: config.namespace_packages.unwrap_or_default(),
             per_file_ignores: resolve_per_file_ignores(
-                config.per_file_ignores.unwrap_or_default(),
+                config
+                    .per_file_ignores
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(config.extend_per_file_ignores)
+                    .collect(),
             )?,
             respect_gitignore: config.respect_gitignore.unwrap_or(true),
-            show_source: config.show_source.unwrap_or_default(),
             src: config
                 .src
                 .unwrap_or_else(|| vec![project_root.to_path_buf()]),
@@ -187,53 +194,105 @@ impl Settings {
             // Plugins
             flake8_annotations: config
                 .flake8_annotations
-                .map(Into::into)
+                .map(flake8_annotations::settings::Settings::from)
                 .unwrap_or_default(),
-            flake8_bandit: config.flake8_bandit.map(Into::into).unwrap_or_default(),
-            flake8_bugbear: config.flake8_bugbear.map(Into::into).unwrap_or_default(),
-            flake8_builtins: config.flake8_builtins.map(Into::into).unwrap_or_default(),
+            flake8_bandit: config
+                .flake8_bandit
+                .map(flake8_bandit::settings::Settings::from)
+                .unwrap_or_default(),
+            flake8_bugbear: config
+                .flake8_bugbear
+                .map(flake8_bugbear::settings::Settings::from)
+                .unwrap_or_default(),
+            flake8_builtins: config
+                .flake8_builtins
+                .map(flake8_builtins::settings::Settings::from)
+                .unwrap_or_default(),
             flake8_comprehensions: config
                 .flake8_comprehensions
-                .map(Into::into)
+                .map(flake8_comprehensions::settings::Settings::from)
                 .unwrap_or_default(),
-            flake8_errmsg: config.flake8_errmsg.map(Into::into).unwrap_or_default(),
+            flake8_copyright: config
+                .flake8_copyright
+                .map(flake8_copyright::settings::Settings::try_from)
+                .transpose()?
+                .unwrap_or_default(),
+            flake8_errmsg: config
+                .flake8_errmsg
+                .map(flake8_errmsg::settings::Settings::from)
+                .unwrap_or_default(),
             flake8_implicit_str_concat: config
                 .flake8_implicit_str_concat
-                .map(Into::into)
+                .map(flake8_implicit_str_concat::settings::Settings::from)
                 .unwrap_or_default(),
             flake8_import_conventions: config
                 .flake8_import_conventions
-                .map(Into::into)
+                .map(flake8_import_conventions::settings::Settings::from)
                 .unwrap_or_default(),
             flake8_pytest_style: config
                 .flake8_pytest_style
-                .map(Into::into)
+                .map(flake8_pytest_style::settings::Settings::from)
                 .unwrap_or_default(),
-            flake8_quotes: config.flake8_quotes.map(Into::into).unwrap_or_default(),
-            flake8_self: config.flake8_self.map(Into::into).unwrap_or_default(),
+            flake8_quotes: config
+                .flake8_quotes
+                .map(flake8_quotes::settings::Settings::from)
+                .unwrap_or_default(),
+            flake8_self: config
+                .flake8_self
+                .map(flake8_self::settings::Settings::from)
+                .unwrap_or_default(),
             flake8_tidy_imports: config
                 .flake8_tidy_imports
-                .map(Into::into)
+                .map(flake8_tidy_imports::settings::Settings::from)
                 .unwrap_or_default(),
             flake8_type_checking: config
                 .flake8_type_checking
-                .map(Into::into)
+                .map(flake8_type_checking::settings::Settings::from)
                 .unwrap_or_default(),
             flake8_unused_arguments: config
                 .flake8_unused_arguments
-                .map(Into::into)
+                .map(flake8_unused_arguments::settings::Settings::from)
                 .unwrap_or_default(),
-            flake8_gettext: config.flake8_gettext.map(Into::into).unwrap_or_default(),
-            isort: config.isort.map(Into::into).unwrap_or_default(),
-            mccabe: config.mccabe.map(Into::into).unwrap_or_default(),
-            pep8_naming: config.pep8_naming.map(Into::into).unwrap_or_default(),
-            pycodestyle: config.pycodestyle.map(Into::into).unwrap_or_default(),
-            pydocstyle: config.pydocstyle.map(Into::into).unwrap_or_default(),
-            pylint: config.pylint.map(Into::into).unwrap_or_default(),
-            pyupgrade: config.pyupgrade.map(Into::into).unwrap_or_default(),
+            flake8_gettext: config
+                .flake8_gettext
+                .map(flake8_gettext::settings::Settings::from)
+                .unwrap_or_default(),
+            isort: config
+                .isort
+                .map(isort::settings::Settings::from)
+                .unwrap_or_default(),
+            mccabe: config
+                .mccabe
+                .map(mccabe::settings::Settings::from)
+                .unwrap_or_default(),
+            pep8_naming: config
+                .pep8_naming
+                .map(pep8_naming::settings::Settings::try_from)
+                .transpose()?
+                .unwrap_or_default(),
+            pycodestyle: config
+                .pycodestyle
+                .map(pycodestyle::settings::Settings::from)
+                .unwrap_or_default(),
+            pydocstyle: config
+                .pydocstyle
+                .map(pydocstyle::settings::Settings::from)
+                .unwrap_or_default(),
+            pyflakes: config
+                .pyflakes
+                .map(pyflakes::settings::Settings::from)
+                .unwrap_or_default(),
+            pylint: config
+                .pylint
+                .map(pylint::settings::Settings::from)
+                .unwrap_or_default(),
+            pyupgrade: config
+                .pyupgrade
+                .map(pyupgrade::settings::Settings::from)
+                .unwrap_or_default(),
             wemake_python_styleguide: config
                 .wemake_python_styleguide
-                .map(Into::into)
+                .map(wemake_python_styleguide::settings::Settings::from)
                 .unwrap_or_default(),
         })
     }
@@ -260,7 +319,10 @@ impl From<&Configuration> for RuleTable {
         // The select_set keeps track of which rules have been selected.
         let mut select_set: RuleSet = defaults::PREFIXES.iter().flatten().collect();
         // The fixable set keeps track of which rules are fixable.
-        let mut fixable_set: RuleSet = RuleSelector::All.into_iter().collect();
+        let mut fixable_set: RuleSet = RuleSelector::All
+            .into_iter()
+            .chain(RuleSelector::Nursery.into_iter())
+            .collect();
 
         // Ignores normally only subtract from the current set of selected
         // rules.  By that logic the ignore in `select = [], ignore = ["E501"]`
@@ -269,16 +331,11 @@ impl From<&Configuration> for RuleTable {
         // across config files (which otherwise wouldn't be possible since ruff
         // only has `extended` but no `extended-by`).
         let mut carryover_ignores: Option<&[RuleSelector]> = None;
+        let mut carryover_unfixables: Option<&[RuleSelector]> = None;
 
         let mut redirects = FxHashMap::default();
 
         for selection in &config.rule_selections {
-            // We do not have an extend-fixable option, so fixable and unfixable
-            // selectors can simply be applied directly to fixable_set.
-            if selection.fixable.is_some() {
-                fixable_set.clear();
-            }
-
             // If a selection only specifies extend-select we cannot directly
             // apply its rule selectors to the select_set because we firstly have
             // to resolve the effectively selected rules within the current rule selection
@@ -287,10 +344,13 @@ impl From<&Configuration> for RuleTable {
             // We do this via the following HashMap where the bool indicates
             // whether to enable or disable the given rule.
             let mut select_map_updates: FxHashMap<Rule, bool> = FxHashMap::default();
+            let mut fixable_map_updates: FxHashMap<Rule, bool> = FxHashMap::default();
 
             let carriedover_ignores = carryover_ignores.take();
+            let carriedover_unfixables = carryover_unfixables.take();
 
             for spec in Specificity::iter() {
+                // Iterate over rule selectors in order of specificity.
                 for selector in selection
                     .select
                     .iter()
@@ -312,17 +372,26 @@ impl From<&Configuration> for RuleTable {
                         select_map_updates.insert(rule, false);
                     }
                 }
-                if let Some(fixable) = &selection.fixable {
-                    fixable_set
-                        .extend(fixable.iter().filter(|s| s.specificity() == spec).flatten());
+                // Apply the same logic to `fixable` and `unfixable`.
+                for selector in selection
+                    .fixable
+                    .iter()
+                    .flatten()
+                    .chain(selection.extend_fixable.iter())
+                    .filter(|s| s.specificity() == spec)
+                {
+                    for rule in selector {
+                        fixable_map_updates.insert(rule, true);
+                    }
                 }
                 for selector in selection
                     .unfixable
                     .iter()
+                    .chain(carriedover_unfixables.into_iter().flatten())
                     .filter(|s| s.specificity() == spec)
                 {
                     for rule in selector {
-                        fixable_set.remove(rule);
+                        fixable_map_updates.insert(rule, false);
                     }
                 }
             }
@@ -352,6 +421,29 @@ impl From<&Configuration> for RuleTable {
                 }
             }
 
+            // Apply the same logic to `fixable` and `unfixable`.
+            if let Some(fixable) = &selection.fixable {
+                fixable_set = fixable_map_updates
+                    .into_iter()
+                    .filter_map(|(rule, enabled)| enabled.then_some(rule))
+                    .collect();
+
+                if fixable.is_empty()
+                    && selection.extend_fixable.is_empty()
+                    && !selection.unfixable.is_empty()
+                {
+                    carryover_unfixables = Some(&selection.unfixable);
+                }
+            } else {
+                for (rule, enabled) in fixable_map_updates {
+                    if enabled {
+                        fixable_set.insert(rule);
+                    } else {
+                        fixable_set.remove(rule);
+                    }
+                }
+            }
+
             // We insert redirects into the hashmap so that we
             // can warn the users about remapped rule codes.
             for selector in selection
@@ -362,6 +454,7 @@ impl From<&Configuration> for RuleTable {
                 .chain(selection.ignore.iter())
                 .chain(selection.extend_select.iter())
                 .chain(selection.unfixable.iter())
+                .chain(selection.extend_fixable.iter())
             {
                 if let RuleSelector::Prefix {
                     prefix,
@@ -436,7 +529,7 @@ pub fn resolve_per_file_ignores(
 
 #[cfg(test)]
 mod tests {
-    use crate::codes::{self, Pycodestyle};
+    use crate::codes::Pycodestyle;
     use crate::registry::{Rule, RuleSet};
     use crate::settings::configuration::Configuration;
     use crate::settings::rule_table::RuleTable;
@@ -456,7 +549,7 @@ mod tests {
     #[test]
     fn rule_codes() {
         let actual = resolve_rules([RuleSelection {
-            select: Some(vec![codes::Pycodestyle::W.into()]),
+            select: Some(vec![Pycodestyle::W.into()]),
             ..RuleSelection::default()
         }]);
 

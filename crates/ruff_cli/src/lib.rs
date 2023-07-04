@@ -1,18 +1,22 @@
-use std::io::{self, BufWriter};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, stdout, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::channel;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::CommandFactory;
+use log::warn;
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 
 use ruff::logging::{set_up_logging, LogLevel};
 use ruff::settings::types::SerializationFormat;
 use ruff::settings::{flags, CliSettings};
 use ruff::{fs, warn_user_once};
+use ruff_python_formatter::{format_module, PyFormatOptions};
 
 use crate::args::{Args, CheckArgs, Command};
+use crate::commands::run_stdin::read_from_stdin;
 use crate::printer::{Flags as PrinterFlags, Printer};
 
 pub mod args;
@@ -21,7 +25,7 @@ mod commands;
 mod diagnostics;
 mod panic;
 mod printer;
-mod resolve;
+pub mod resolve;
 
 #[derive(Copy, Clone)]
 pub enum ExitStatus {
@@ -43,6 +47,57 @@ impl From<ExitStatus> for ExitCode {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ChangeKind {
+    Configuration,
+    SourceFile,
+}
+
+/// Return the [`ChangeKind`] based on the list of modified file paths.
+///
+/// Returns `None` if no relevant changes were detected.
+fn change_detected(paths: &[PathBuf]) -> Option<ChangeKind> {
+    // If any `.toml` files were modified, return `ChangeKind::Configuration`. Otherwise, return
+    // `ChangeKind::SourceFile` if any `.py`, `.pyi`, `.pyw`, or `.ipynb` files were modified.
+    let mut source_file = false;
+    for path in paths {
+        if let Some(suffix) = path.extension() {
+            match suffix.to_str() {
+                Some("toml") => {
+                    return Some(ChangeKind::Configuration);
+                }
+                Some("py" | "pyi" | "pyw" | "ipynb") => source_file = true,
+                _ => {}
+            }
+        }
+    }
+    if source_file {
+        return Some(ChangeKind::SourceFile);
+    }
+    None
+}
+
+/// Returns true if the linter should read from standard input.
+fn is_stdin(files: &[PathBuf], stdin_filename: Option<&Path>) -> bool {
+    // If the user provided a `--stdin-filename`, always read from standard input.
+    if stdin_filename.is_some() {
+        if let Some(file) = files.iter().find(|file| file.as_path() != Path::new("-")) {
+            warn_user_once!(
+                "Ignoring file {} in favor of standard input.",
+                file.display()
+            );
+        }
+        return true;
+    }
+
+    // If the user provided exactly `-`, read from standard input.
+    if files.len() == 1 && files[0] == Path::new("-") {
+        return true;
+    }
+
+    false
+}
+
 pub fn run(
     Args {
         command,
@@ -60,7 +115,7 @@ pub fn run(
                     r#"
 {}: `ruff` crashed. This indicates a bug in `ruff`. If you could open an issue at:
 
-https://github.com/charliermarsh/ruff/issues/new?title=%5BPanic%5D
+https://github.com/astral-sh/ruff/issues/new?title=%5BPanic%5D
 
 quoting the executed command, along with the relevant file contents and `pyproject.toml` settings, we'd be very appreciative!
 "#,
@@ -75,7 +130,7 @@ quoting the executed command, along with the relevant file contents and `pyproje
     #[cfg(windows)]
     assert!(colored::control::set_virtual_terminal(true).is_ok());
 
-    let log_level: LogLevel = (&log_level_args).into();
+    let log_level = LogLevel::from(&log_level_args);
     set_up_logging(&log_level)?;
 
     match command {
@@ -87,29 +142,77 @@ quoting the executed command, along with the relevant file contents and `pyproje
             shell.generate(&mut Args::command(), &mut io::stdout());
         }
         Command::Check(args) => return check(args, log_level),
+        Command::Format { files } => return format(&files),
     }
 
     Ok(ExitStatus::Success)
 }
 
-fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
+fn format(files: &[PathBuf]) -> Result<ExitStatus> {
+    warn_user_once!(
+        "`ruff format` is a work-in-progress, subject to change at any time, and intended for \
+        internal use only."
+    );
+
+    let format_code = |code: &str| {
+        // dummy, to check that the function was actually called
+        let contents = code.replace("# DEL", "");
+        // real formatting that is currently a passthrough
+        format_module(&contents, PyFormatOptions::default())
+    };
+
+    match &files {
+        // Check if we should read from stdin
+        [path] if path == Path::new("-") => {
+            let unformatted = read_from_stdin()?;
+            let formatted = format_code(&unformatted)?;
+            stdout().lock().write_all(formatted.as_code().as_bytes())?;
+        }
+        _ => {
+            for file in files {
+                let unformatted = std::fs::read_to_string(file)
+                    .with_context(|| format!("Could not read {}: ", file.display()))?;
+                let formatted = format_code(&unformatted)?;
+                std::fs::write(file, formatted.as_code().as_bytes())
+                    .with_context(|| format!("Could not write to {}, exiting", file.display()))?;
+            }
+        }
+    }
+    Ok(ExitStatus::Success)
+}
+
+pub fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
     let (cli, overrides) = args.partition();
 
     // Construct the "default" settings. These are used when no `pyproject.toml`
     // files are present, or files are injected from outside of the hierarchy.
-    let pyproject_strategy = resolve::resolve(
+    let pyproject_config = resolve::resolve(
         cli.isolated,
         cli.config.as_deref(),
         &overrides,
         cli.stdin_filename.as_deref(),
     )?;
 
+    let mut writer: Box<dyn Write> = match cli.output_file {
+        Some(path) if !cli.watch => {
+            colored::control::set_override(false);
+            let file = File::create(path)?;
+            Box::new(BufWriter::new(file))
+        }
+        _ => Box::new(BufWriter::new(io::stdout())),
+    };
+
     if cli.show_settings {
-        commands::show_settings::show_settings(&cli.files, &pyproject_strategy, &overrides)?;
+        commands::show_settings::show_settings(
+            &cli.files,
+            &pyproject_config,
+            &overrides,
+            &mut writer,
+        )?;
         return Ok(ExitStatus::Success);
     }
     if cli.show_files {
-        commands::show_files::show_files(&cli.files, &pyproject_strategy, &overrides)?;
+        commands::show_files::show_files(&cli.files, &pyproject_config, &overrides, &mut writer)?;
         return Ok(ExitStatus::Success);
     }
 
@@ -120,28 +223,22 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
         fix_only,
         format,
         show_fixes,
-        update_check,
+        show_source,
         ..
-    } = pyproject_strategy.top_level_settings().cli.clone();
+    } = pyproject_config.settings.cli;
 
     // Autofix rules are as follows:
+    // - By default, generate all fixes, but don't apply them to the filesystem.
     // - If `--fix` or `--fix-only` is set, always apply fixes to the filesystem (or
     //   print them to stdout, if we're reading from stdin).
-    // - Otherwise, if `--format json` is set, generate the fixes (so we print them
-    //   out as part of the JSON payload), but don't write them to disk.
     // - If `--diff` or `--fix-only` are set, don't print any violations (only
     //   fixes).
-    // TODO(charlie): Consider adding ESLint's `--fix-dry-run`, which would generate
-    // but not apply fixes. That would allow us to avoid special-casing JSON
-    // here.
     let autofix = if cli.diff {
         flags::FixMode::Diff
     } else if fix || fix_only {
         flags::FixMode::Apply
-    } else if matches!(format, SerializationFormat::Json) {
-        flags::FixMode::Generate
     } else {
-        flags::FixMode::None
+        flags::FixMode::Generate
     };
     let cache = !cli.no_cache;
     let noqa = !cli.ignore_noqa;
@@ -150,7 +247,17 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
         printer_flags |= PrinterFlags::SHOW_VIOLATIONS;
     }
     if show_fixes {
-        printer_flags |= PrinterFlags::SHOW_FIXES;
+        printer_flags |= PrinterFlags::SHOW_FIX_SUMMARY;
+    }
+    if show_source {
+        printer_flags |= PrinterFlags::SHOW_SOURCE;
+    }
+    if cli.ecosystem_ci {
+        warn_user_once!(
+            "The formatting of fixes emitted by this option is a work-in-progress, subject to \
+            change at any time, and intended only for internal use."
+        );
+        printer_flags |= PrinterFlags::SHOW_FIX_DIFF;
     }
 
     #[cfg(debug_assertions)]
@@ -161,11 +268,11 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
     }
 
     if cli.add_noqa {
-        if !matches!(autofix, flags::FixMode::None) {
+        if !autofix.is_generate() {
             warn_user_once!("--fix is incompatible with --add-noqa.");
         }
         let modifications =
-            commands::add_noqa::add_noqa(&cli.files, &pyproject_strategy, &overrides)?;
+            commands::add_noqa::add_noqa(&cli.files, &pyproject_config, &overrides)?;
         if modifications > 0 && log_level >= LogLevel::Default {
             let s = if modifications == 1 { "" } else { "s" };
             #[allow(clippy::print_stderr)]
@@ -179,11 +286,18 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
     let printer = Printer::new(format, log_level, autofix, printer_flags);
 
     if cli.watch {
-        if !matches!(autofix, flags::FixMode::None) {
-            warn_user_once!("--fix is unsupported in watch mode.");
-        }
         if format != SerializationFormat::Text {
             warn_user_once!("--format 'text' is used in watch mode.");
+        }
+
+        // Configure the file watcher.
+        let (tx, rx) = channel();
+        let mut watcher = recommended_watcher(tx)?;
+        for file in &cli.files {
+            watcher.watch(file, RecursiveMode::Recursive)?;
+        }
+        if let Some(file) = pyproject_config.path.as_ref() {
+            watcher.watch(file, RecursiveMode::Recursive)?;
         }
 
         // Perform an initial run instantly.
@@ -192,56 +306,57 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
 
         let messages = commands::run::run(
             &cli.files,
-            &pyproject_strategy,
+            &pyproject_config,
             &overrides,
             cache.into(),
             noqa.into(),
-            flags::FixMode::None,
+            autofix,
         )?;
-        printer.write_continuously(&messages)?;
+        printer.write_continuously(&mut writer, &messages)?;
 
-        // Configure the file watcher.
-        let (tx, rx) = channel();
-        let mut watcher = recommended_watcher(tx)?;
-        for file in &cli.files {
-            watcher.watch(file, RecursiveMode::Recursive)?;
-        }
+        // In watch mode, we may need to re-resolve the configuration.
+        // TODO(charlie): Re-compute other derivative values, like the `printer`.
+        let mut pyproject_config = pyproject_config;
 
         loop {
             match rx.recv() {
                 Ok(event) => {
-                    let paths = event?.paths;
-                    let py_changed = paths.iter().any(|path| {
-                        path.extension()
-                            .map(|ext| ext == "py" || ext == "pyi")
-                            .unwrap_or_default()
-                    });
-                    if py_changed {
-                        Printer::clear_screen()?;
-                        printer.write_to_user("File change detected...\n");
+                    let Some(change_kind) = change_detected(&event?.paths) else {
+                        continue;
+                    };
 
-                        let messages = commands::run::run(
-                            &cli.files,
-                            &pyproject_strategy,
+                    if matches!(change_kind, ChangeKind::Configuration) {
+                        pyproject_config = resolve::resolve(
+                            cli.isolated,
+                            cli.config.as_deref(),
                             &overrides,
-                            cache.into(),
-                            noqa.into(),
-                            flags::FixMode::None,
+                            cli.stdin_filename.as_deref(),
                         )?;
-                        printer.write_continuously(&messages)?;
                     }
+                    Printer::clear_screen()?;
+                    printer.write_to_user("File change detected...\n");
+
+                    let messages = commands::run::run(
+                        &cli.files,
+                        &pyproject_config,
+                        &overrides,
+                        cache.into(),
+                        noqa.into(),
+                        autofix,
+                    )?;
+                    printer.write_continuously(&mut writer, &messages)?;
                 }
                 Err(err) => return Err(err.into()),
             }
         }
     } else {
-        let is_stdin = cli.files == vec![PathBuf::from("-")];
+        let is_stdin = is_stdin(&cli.files, cli.stdin_filename.as_deref());
 
         // Generate lint violations.
         let diagnostics = if is_stdin {
             commands::run_stdin::run_stdin(
                 cli.stdin_filename.map(fs::normalize_path).as_deref(),
-                &pyproject_strategy,
+                &pyproject_config,
                 &overrides,
                 noqa.into(),
                 autofix,
@@ -249,7 +364,7 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
         } else {
             commands::run::run(
                 &cli.files,
-                &pyproject_strategy,
+                &pyproject_config,
                 &overrides,
                 cache.into(),
                 noqa.into(),
@@ -262,35 +377,124 @@ fn check(args: CheckArgs, log_level: LogLevel) -> Result<ExitStatus> {
         // source code goes to stdout).
         if !(is_stdin && matches!(autofix, flags::FixMode::Apply | flags::FixMode::Diff)) {
             if cli.statistics {
-                printer.write_statistics(&diagnostics)?;
+                printer.write_statistics(&diagnostics, &mut writer)?;
             } else {
-                let mut stdout = BufWriter::new(io::stdout().lock());
-                printer.write_once(&diagnostics, &mut stdout)?;
+                printer.write_once(&diagnostics, &mut writer)?;
             }
         }
 
-        if update_check {
-            warn_user_once!(
-                "update-check has been removed; setting it will cause an error in a future \
-                 version."
-            );
-        }
-
         if !cli.exit_zero {
-            if cli.diff || fix_only {
+            if cli.diff {
+                // If we're printing a diff, we always want to exit non-zero if there are
+                // any fixable violations (since we've printed the diff, but not applied the
+                // fixes).
                 if !diagnostics.fixed.is_empty() {
                     return Ok(ExitStatus::Failure);
                 }
-            } else if cli.exit_non_zero_on_fix {
-                if !diagnostics.fixed.is_empty() || !diagnostics.messages.is_empty() {
-                    return Ok(ExitStatus::Failure);
+            } else if fix_only {
+                // If we're only fixing, we want to exit zero (since we've fixed all fixable
+                // violations), unless we're explicitly asked to exit non-zero on fix.
+                if cli.exit_non_zero_on_fix {
+                    if !diagnostics.fixed.is_empty() {
+                        return Ok(ExitStatus::Failure);
+                    }
                 }
             } else {
-                if !diagnostics.messages.is_empty() {
-                    return Ok(ExitStatus::Failure);
+                // If we're running the linter (not just fixing), we want to exit non-zero if
+                // there are any violations, unless we're explicitly asked to exit zero on
+                // fix.
+                if cli.exit_non_zero_on_fix {
+                    if !diagnostics.fixed.is_empty() || !diagnostics.messages.is_empty() {
+                        return Ok(ExitStatus::Failure);
+                    }
+                } else {
+                    if !diagnostics.messages.is_empty() {
+                        return Ok(ExitStatus::Failure);
+                    }
                 }
             }
         }
     }
     Ok(ExitStatus::Success)
+}
+
+#[cfg(test)]
+mod test_file_change_detector {
+    use std::path::PathBuf;
+
+    use crate::{change_detected, ChangeKind};
+
+    #[test]
+    fn detect_correct_file_change() {
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("tmp/pyproject.toml"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("pyproject.toml"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("tmp1/tmp2/tmp3/pyproject.toml"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("tmp/ruff.toml"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("tmp/.ruff.toml"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::SourceFile),
+            change_detected(&[
+                PathBuf::from("tmp/rule.py"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::SourceFile),
+            change_detected(&[
+                PathBuf::from("tmp/rule.pyi"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("pyproject.toml"),
+                PathBuf::from("tmp/rule.py"),
+            ]),
+        );
+        assert_eq!(
+            Some(ChangeKind::Configuration),
+            change_detected(&[
+                PathBuf::from("tmp/rule.py"),
+                PathBuf::from("pyproject.toml"),
+            ]),
+        );
+        assert_eq!(
+            None,
+            change_detected(&[
+                PathBuf::from("tmp/rule.js"),
+                PathBuf::from("tmp/bin/ruff.rs"),
+            ]),
+        );
+    }
 }

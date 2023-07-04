@@ -11,7 +11,7 @@ use super::types::EitherImport::{Import, ImportFrom};
 use super::types::{AliasData, EitherImport, ImportFromData};
 
 #[derive(PartialOrd, Ord, PartialEq, Eq, Copy, Clone)]
-pub enum Prefix {
+pub(crate) enum Prefix {
     Constants,
     Classes,
     Variables,
@@ -32,7 +32,7 @@ fn prefix(
     } else if variables.contains(name) {
         // Ex) `variable`
         Prefix::Variables
-    } else if name.len() > 1 && str::is_upper(name) {
+    } else if name.len() > 1 && str::is_cased_uppercase(name) {
         // Ex) `CONSTANT`
         Prefix::Constants
     } else if name.chars().next().map_or(false, char::is_uppercase) {
@@ -52,7 +52,7 @@ fn cmp_force_to_top(name1: &str, name2: &str, force_to_top: &BTreeSet<String>) -
 }
 
 /// Compare two top-level modules.
-pub fn cmp_modules(
+pub(crate) fn cmp_modules(
     alias1: &AliasData,
     alias2: &AliasData,
     force_to_top: &BTreeSet<String>,
@@ -68,8 +68,8 @@ pub fn cmp_modules(
         })
 }
 
-/// Compare two member imports within `StmtKind::ImportFrom` blocks.
-pub fn cmp_members(
+/// Compare two member imports within `Stmt::ImportFrom` blocks.
+pub(crate) fn cmp_members(
     alias1: &AliasData,
     alias2: &AliasData,
     order_by_type: bool,
@@ -94,9 +94,9 @@ pub fn cmp_members(
 }
 
 /// Compare two relative import levels.
-pub fn cmp_levels(
-    level1: Option<usize>,
-    level2: Option<usize>,
+pub(crate) fn cmp_levels(
+    level1: Option<u32>,
+    level2: Option<u32>,
     relative_imports_order: RelativeImportsOrder,
 ) -> Ordering {
     match (level1, level2) {
@@ -110,8 +110,8 @@ pub fn cmp_levels(
     }
 }
 
-/// Compare two `StmtKind::ImportFrom` blocks.
-pub fn cmp_import_from(
+/// Compare two `Stmt::ImportFrom` blocks.
+pub(crate) fn cmp_import_from(
     import_from1: &ImportFromData,
     import_from2: &ImportFromData,
     relative_imports_order: RelativeImportsOrder,
@@ -151,7 +151,7 @@ fn cmp_import_import_from(
 
 /// Compare two [`EitherImport`] enums which may be [`Import`] or [`ImportFrom`]
 /// structs.
-pub fn cmp_either_import(
+pub(crate) fn cmp_either_import(
     a: &EitherImport,
     b: &EitherImport,
     relative_imports_order: RelativeImportsOrder,

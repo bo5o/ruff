@@ -1,22 +1,21 @@
 use std::str::FromStr;
 
-use itertools::Itertools;
-use schemars::_serde_json::Value;
-use schemars::schema::{InstanceType, Schema, SchemaObject};
-use schemars::JsonSchema;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 use crate::codes::RuleCodePrefix;
-use crate::registry::{Linter, Rule, RuleIter, RuleNamespace};
+use crate::codes::RuleIter;
+use crate::registry::{Linter, Rule, RuleNamespace};
 use crate::rule_redirects::get_redirect;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuleSelector {
-    /// Select all rules.
+    /// Select all stable rules.
     All,
+    /// Select all nursery rules.
+    Nursery,
     /// Legacy category to select both the `mccabe` and `flake8-comprehensions` linters
     /// via a single selector.
     C,
@@ -42,30 +41,30 @@ impl FromStr for RuleSelector {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "ALL" {
-            Ok(Self::All)
-        } else if s == "C" {
-            Ok(Self::C)
-        } else if s == "T" {
-            Ok(Self::T)
-        } else {
-            let (s, redirected_from) = match get_redirect(s) {
-                Some((from, target)) => (target, Some(from)),
-                None => (s, None),
-            };
+        match s {
+            "ALL" => Ok(Self::All),
+            "NURSERY" => Ok(Self::Nursery),
+            "C" => Ok(Self::C),
+            "T" => Ok(Self::T),
+            _ => {
+                let (s, redirected_from) = match get_redirect(s) {
+                    Some((from, target)) => (target, Some(from)),
+                    None => (s, None),
+                };
 
-            let (linter, code) =
-                Linter::parse_code(s).ok_or_else(|| ParseError::Unknown(s.to_string()))?;
+                let (linter, code) =
+                    Linter::parse_code(s).ok_or_else(|| ParseError::Unknown(s.to_string()))?;
 
-            if code.is_empty() {
-                return Ok(Self::Linter(linter));
+                if code.is_empty() {
+                    return Ok(Self::Linter(linter));
+                }
+
+                Ok(Self::Prefix {
+                    prefix: RuleCodePrefix::parse(&linter, code)
+                        .map_err(|_| ParseError::Unknown(s.to_string()))?,
+                    redirected_from,
+                })
             }
-
-            Ok(Self::Prefix {
-                prefix: RuleCodePrefix::parse(&linter, code)
-                    .map_err(|_| ParseError::Unknown(s.to_string()))?,
-                redirected_from,
-            })
         }
     }
 }
@@ -82,6 +81,7 @@ impl RuleSelector {
     pub fn prefix_and_code(&self) -> (&'static str, &'static str) {
         match self {
             RuleSelector::All => ("", "ALL"),
+            RuleSelector::Nursery => ("", "NURSERY"),
             RuleSelector::C => ("", "C"),
             RuleSelector::T => ("", "T"),
             RuleSelector::Prefix { prefix, .. } => {
@@ -123,8 +123,7 @@ impl Visitor<'_> for SelectorVisitor {
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         formatter.write_str(
-            "expected a string code identifying a linter or specific rule, or a partial rule code \
-             or ALL to refer to all rules",
+            "expected a string code identifying a linter or specific rule, or a partial rule code or ALL to refer to all rules",
         )
     }
 
@@ -151,25 +150,31 @@ impl IntoIterator for &RuleSelector {
 
     fn into_iter(self) -> Self::IntoIter {
         match self {
-            RuleSelector::All => RuleSelectorIter::All(Rule::iter()),
+            RuleSelector::All => {
+                RuleSelectorIter::All(Rule::iter().filter(|rule| !rule.is_nursery()))
+            }
+            RuleSelector::Nursery => {
+                RuleSelectorIter::Nursery(Rule::iter().filter(Rule::is_nursery))
+            }
             RuleSelector::C => RuleSelectorIter::Chain(
                 Linter::Flake8Comprehensions
-                    .into_iter()
-                    .chain(Linter::McCabe.into_iter()),
+                    .rules()
+                    .chain(Linter::McCabe.rules()),
             ),
             RuleSelector::T => RuleSelectorIter::Chain(
                 Linter::Flake8Debugger
-                    .into_iter()
-                    .chain(Linter::Flake8Print.into_iter()),
+                    .rules()
+                    .chain(Linter::Flake8Print.rules()),
             ),
-            RuleSelector::Linter(linter) => RuleSelectorIter::Vec(linter.into_iter()),
-            RuleSelector::Prefix { prefix, .. } => RuleSelectorIter::Vec(prefix.into_iter()),
+            RuleSelector::Linter(linter) => RuleSelectorIter::Vec(linter.rules()),
+            RuleSelector::Prefix { prefix, .. } => RuleSelectorIter::Vec(prefix.clone().rules()),
         }
     }
 }
 
 pub enum RuleSelectorIter {
-    All(RuleIter),
+    All(std::iter::Filter<RuleIter, fn(&Rule) -> bool>),
+    Nursery(std::iter::Filter<RuleIter, fn(&Rule) -> bool>),
     Chain(std::iter::Chain<std::vec::IntoIter<Rule>, std::vec::IntoIter<Rule>>),
     Vec(std::vec::IntoIter<Rule>),
 }
@@ -180,6 +185,7 @@ impl Iterator for RuleSelectorIter {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             RuleSelectorIter::All(iter) => iter.next(),
+            RuleSelectorIter::Nursery(iter) => iter.next(),
             RuleSelectorIter::Chain(iter) => iter.next(),
             RuleSelectorIter::Vec(iter) => iter.next(),
         }
@@ -198,59 +204,58 @@ pub(crate) const fn prefix_to_selector(prefix: RuleCodePrefix) -> RuleSelector {
     }
 }
 
-impl JsonSchema for RuleSelector {
-    fn schema_name() -> String {
-        "RuleSelector".to_string()
-    }
+#[cfg(feature = "schemars")]
+mod schema {
+    use itertools::Itertools;
+    use schemars::JsonSchema;
+    use schemars::_serde_json::Value;
+    use schemars::schema::{InstanceType, Schema, SchemaObject};
+    use strum::IntoEnumIterator;
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
-        Schema::Object(SchemaObject {
-            instance_type: Some(InstanceType::String.into()),
-            enum_values: Some(
-                [
-                    // Include the non-standard "ALL" selector.
-                    "ALL".to_string(),
-                    // Include the legacy "C" and "T" selectors.
-                    "C".to_string(),
-                    "T".to_string(),
-                    // Include some common redirect targets for those legacy selectors.
-                    "C9".to_string(),
-                    "T1".to_string(),
-                    "T2".to_string(),
-                ]
-                .into_iter()
-                .chain(
-                    RuleCodePrefix::iter()
-                        .filter(|p| {
-                            // Once logical lines are active by default, please remove this.
-                            // This is here because generate-all output otherwise depends on
-                            // the feature sets which makes the test running with
-                            // `--all-features` fail
-                            !Rule::from_code(&format!(
-                                "{}{}",
-                                p.linter().common_prefix(),
-                                p.short_code()
-                            ))
-                            .unwrap()
-                            .lint_source()
-                            .is_logical_lines()
-                        })
-                        .map(|p| {
-                            let prefix = p.linter().common_prefix();
-                            let code = p.short_code();
-                            format!("{prefix}{code}")
-                        })
-                        .chain(Linter::iter().filter_map(|l| {
-                            let prefix = l.common_prefix();
-                            (!prefix.is_empty()).then(|| prefix.to_string())
-                        })),
-                )
-                .sorted()
-                .map(Value::String)
-                .collect(),
-            ),
-            ..SchemaObject::default()
-        })
+    use crate::registry::RuleNamespace;
+    use crate::rule_selector::{Linter, RuleCodePrefix};
+    use crate::RuleSelector;
+
+    impl JsonSchema for RuleSelector {
+        fn schema_name() -> String {
+            "RuleSelector".to_string()
+        }
+
+        fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+            Schema::Object(SchemaObject {
+                instance_type: Some(InstanceType::String.into()),
+                enum_values: Some(
+                    [
+                        // Include the non-standard "ALL" selector.
+                        "ALL".to_string(),
+                        // Include the legacy "C" and "T" selectors.
+                        "C".to_string(),
+                        "T".to_string(),
+                        // Include some common redirect targets for those legacy selectors.
+                        "C9".to_string(),
+                        "T1".to_string(),
+                        "T2".to_string(),
+                    ]
+                    .into_iter()
+                    .chain(
+                        RuleCodePrefix::iter()
+                            .map(|p| {
+                                let prefix = p.linter().common_prefix();
+                                let code = p.short_code();
+                                format!("{prefix}{code}")
+                            })
+                            .chain(Linter::iter().filter_map(|l| {
+                                let prefix = l.common_prefix();
+                                (!prefix.is_empty()).then(|| prefix.to_string())
+                            })),
+                    )
+                    .sorted()
+                    .map(Value::String)
+                    .collect(),
+                ),
+                ..SchemaObject::default()
+            })
+        }
     }
 }
 
@@ -258,6 +263,7 @@ impl RuleSelector {
     pub(crate) fn specificity(&self) -> Specificity {
         match self {
             RuleSelector::All => Specificity::All,
+            RuleSelector::Nursery => Specificity::All,
             RuleSelector::T => Specificity::LinterGroup,
             RuleSelector::C => Specificity::LinterGroup,
             RuleSelector::Linter(..) => Specificity::Linter,
@@ -340,7 +346,7 @@ mod clap_completion {
                             let prefix = p.linter().common_prefix();
                             let code = p.short_code();
 
-                            let mut rules_iter = p.into_iter();
+                            let mut rules_iter = p.rules();
                             let rule1 = rules_iter.next();
                             let rule2 = rules_iter.next();
 

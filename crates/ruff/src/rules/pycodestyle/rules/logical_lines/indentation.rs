@@ -2,7 +2,6 @@ use ruff_diagnostics::DiagnosticKind;
 use ruff_diagnostics::Violation;
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::token_kind::TokenKind;
-use rustpython_parser::ast::Location;
 
 use super::LogicalLine;
 
@@ -10,7 +9,7 @@ use super::LogicalLine;
 /// Checks for indentation with a non-multiple of 4 spaces.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, 4 spaces per indentation level should be preferred.
+/// According to [PEP 8], 4 spaces per indentation level should be preferred.
 ///
 /// ## Example
 /// ```python
@@ -24,11 +23,10 @@ use super::LogicalLine;
 ///     a = 1
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct IndentationWithInvalidMultiple {
-    pub indent_size: usize,
+    indent_size: usize,
 }
 
 impl Violation for IndentationWithInvalidMultiple {
@@ -43,7 +41,7 @@ impl Violation for IndentationWithInvalidMultiple {
 /// Checks for indentation of comments with a non-multiple of 4 spaces.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, 4 spaces per indentation level should be preferred.
+/// According to [PEP 8], 4 spaces per indentation level should be preferred.
 ///
 /// ## Example
 /// ```python
@@ -57,11 +55,10 @@ impl Violation for IndentationWithInvalidMultiple {
 ///     # a = 1
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct IndentationWithInvalidMultipleComment {
-    pub indent_size: usize,
+    indent_size: usize,
 }
 
 impl Violation for IndentationWithInvalidMultipleComment {
@@ -83,7 +80,6 @@ impl Violation for IndentationWithInvalidMultipleComment {
 /// ```python
 /// for item in items:
 /// pass
-///
 /// ```
 ///
 /// Use instead:
@@ -92,8 +88,7 @@ impl Violation for IndentationWithInvalidMultipleComment {
 ///     pass
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct NoIndentedBlock;
 
@@ -125,8 +120,7 @@ impl Violation for NoIndentedBlock {
 ///     pass
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct NoIndentedBlockComment;
 
@@ -155,8 +149,7 @@ impl Violation for NoIndentedBlockComment {
 /// b = 2
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct UnexpectedIndentation;
 
@@ -185,8 +178,7 @@ impl Violation for UnexpectedIndentation {
 /// # b = 2
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
 pub struct UnexpectedIndentationComment;
 
@@ -201,7 +193,7 @@ impl Violation for UnexpectedIndentationComment {
 /// Checks for over-indented code.
 ///
 /// ## Why is this bad?
-/// Per PEP 8, 4 spaces per indentation level should be preferred. Increased
+/// According to [PEP 8], 4 spaces per indentation level should be preferred. Increased
 /// indentation can lead to inconsistent formatting, which can hurt
 /// readability.
 ///
@@ -217,15 +209,21 @@ impl Violation for UnexpectedIndentationComment {
 ///     pass
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#indentation)
+/// [PEP 8]: https://peps.python.org/pep-0008/#indentation
 #[violation]
-pub struct OverIndented;
+pub struct OverIndented {
+    is_comment: bool,
+}
 
 impl Violation for OverIndented {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Over-indented")
+        let OverIndented { is_comment } = self;
+        if *is_comment {
+            format!("Over-indented (comment)")
+        } else {
+            format!("Over-indented")
+        }
     }
 }
 
@@ -237,51 +235,45 @@ pub(crate) fn indentation(
     indent_level: usize,
     prev_indent_level: Option<usize>,
     indent_size: usize,
-) -> Vec<(Location, DiagnosticKind)> {
+) -> Vec<DiagnosticKind> {
     let mut diagnostics = vec![];
 
-    let location = logical_line.first_token_location().unwrap();
-
     if indent_level % indent_size != 0 {
-        diagnostics.push((
-            location,
-            if logical_line.is_comment_only() {
-                IndentationWithInvalidMultipleComment { indent_size }.into()
-            } else {
-                IndentationWithInvalidMultiple { indent_size }.into()
-            },
-        ));
+        diagnostics.push(if logical_line.is_comment_only() {
+            DiagnosticKind::from(IndentationWithInvalidMultipleComment { indent_size })
+        } else {
+            DiagnosticKind::from(IndentationWithInvalidMultiple { indent_size })
+        });
     }
     let indent_expect = prev_logical_line
         .and_then(|prev_logical_line| prev_logical_line.tokens_trimmed().last())
         .map_or(false, |t| t.kind() == TokenKind::Colon);
 
     if indent_expect && indent_level <= prev_indent_level.unwrap_or(0) {
-        diagnostics.push((
-            location,
-            if logical_line.is_comment_only() {
-                NoIndentedBlockComment.into()
-            } else {
-                NoIndentedBlock.into()
-            },
-        ));
+        diagnostics.push(if logical_line.is_comment_only() {
+            DiagnosticKind::from(NoIndentedBlockComment)
+        } else {
+            DiagnosticKind::from(NoIndentedBlock)
+        });
     } else if !indent_expect
         && prev_indent_level.map_or(false, |prev_indent_level| indent_level > prev_indent_level)
     {
-        diagnostics.push((
-            location,
-            if logical_line.is_comment_only() {
-                UnexpectedIndentationComment.into()
-            } else {
-                UnexpectedIndentation.into()
-            },
-        ));
+        diagnostics.push(if logical_line.is_comment_only() {
+            DiagnosticKind::from(UnexpectedIndentationComment)
+        } else {
+            DiagnosticKind::from(UnexpectedIndentation)
+        });
     }
     if indent_expect {
         let expected_indent_amount = if indent_char == '\t' { 8 } else { 4 };
         let expected_indent_level = prev_indent_level.unwrap_or(0) + expected_indent_amount;
         if indent_level > expected_indent_level {
-            diagnostics.push((location, OverIndented.into()));
+            diagnostics.push(
+                OverIndented {
+                    is_comment: logical_line.is_comment_only(),
+                }
+                .into(),
+            );
         }
     }
 

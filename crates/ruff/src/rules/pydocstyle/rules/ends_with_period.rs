@@ -1,18 +1,48 @@
+use ruff_text_size::TextLen;
 use strum::IntoEnumIterator;
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::newlines::StrExt;
-use ruff_python_ast::str::leading_quote;
-use ruff_python_ast::types::Range;
+use ruff_python_whitespace::{UniversalNewlineIterator, UniversalNewlines};
 
 use crate::checkers::ast::Checker;
-use crate::docstrings::definition::Docstring;
 use crate::docstrings::sections::SectionKind;
-use crate::message::Location;
+use crate::docstrings::Docstring;
 use crate::registry::AsRule;
 use crate::rules::pydocstyle::helpers::logical_line;
 
+/// ## What it does
+/// Checks for docstrings in which the first line does not end in a period.
+///
+/// ## Why is this bad?
+/// [PEP 257] recommends that the first line of a docstring is written in the
+/// form of a command, ending in a period.
+///
+/// This rule may not apply to all projects; its applicability is a matter of
+/// convention. By default, this rule is enabled when using the `numpy` and
+/// `pep257` conventions, and disabled when using the `google` convention.
+///
+/// ## Example
+/// ```python
+/// def average(values: list[float]) -> float:
+///     """Return the mean of the given values"""
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def average(values: list[float]) -> float:
+///     """Return the mean of the given values."""
+/// ```
+///
+/// ## Options
+/// - `pydocstyle.convention`
+///
+/// ## References
+/// - [PEP 257 – Docstring Conventions](https://peps.python.org/pep-0257/)
+/// - [NumPy Style Guide](https://numpydoc.readthedocs.io/en/latest/format.html)
+/// - [Google Python Style Guide - Docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings)
+///
+/// [PEP 257]: https://peps.python.org/pep-0257/
 #[violation]
 pub struct EndsInPeriod;
 
@@ -28,9 +58,8 @@ impl AlwaysAutofixableViolation for EndsInPeriod {
 }
 
 /// D400
-pub fn ends_with_period(checker: &mut Checker, docstring: &Docstring) {
-    let contents = docstring.contents;
-    let body = docstring.body;
+pub(crate) fn ends_with_period(checker: &mut Checker, docstring: &Docstring) {
+    let body = docstring.body();
 
     if let Some(first_line) = body.trim().universal_newlines().next() {
         let trimmed = first_line.trim();
@@ -55,35 +84,22 @@ pub fn ends_with_period(checker: &mut Checker, docstring: &Docstring) {
         }
     }
 
-    if let Some(index) = logical_line(body) {
-        let line = body.universal_newlines().nth(index).unwrap();
+    if let Some(index) = logical_line(body.as_str()) {
+        let mut lines = UniversalNewlineIterator::with_offset(&body, body.start());
+        let line = lines.nth(index).unwrap();
         let trimmed = line.trim_end();
 
         if !trimmed.ends_with('.') {
-            let mut diagnostic = Diagnostic::new(EndsInPeriod, Range::from(docstring.expr));
+            let mut diagnostic = Diagnostic::new(EndsInPeriod, docstring.range());
             // Best-effort autofix: avoid adding a period after other punctuation marks.
             if checker.patch(diagnostic.kind.rule())
                 && !trimmed.ends_with(':')
                 && !trimmed.ends_with(';')
             {
-                if let Some((row, column)) = if index == 0 {
-                    leading_quote(contents).map(|pattern| {
-                        (
-                            docstring.expr.location.row(),
-                            docstring.expr.location.column()
-                                + pattern.len()
-                                + trimmed.chars().count(),
-                        )
-                    })
-                } else {
-                    Some((
-                        docstring.expr.location.row() + index,
-                        trimmed.chars().count(),
-                    ))
-                } {
-                    diagnostic
-                        .set_fix(Edit::insertion(".".to_string(), Location::new(row, column)));
-                }
+                diagnostic.set_fix(Fix::suggested(Edit::insertion(
+                    ".".to_string(),
+                    line.start() + trimmed.text_len(),
+                )));
             }
             checker.diagnostics.push(diagnostic);
         };

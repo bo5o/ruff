@@ -8,9 +8,9 @@ detailed overview, see [_Configuration_](configuration.md).
 Let's assume that our project structure looks like:
 
 ```text
-numbers/
-    __init__.py
-    numbers.py
+numbers
+  ├── __init__.py
+  └── numbers.py
 ```
 
 Where `numbers.py` contains the following code:
@@ -26,7 +26,7 @@ def sum_even_numbers(numbers: List[int]) -> int:
     return sum(num for num in numbers if num % 2 == 0)
 ```
 
-To start, we'll install Ruff through PyPI (or with our [preferred package manager](installation.md)):
+To start, we'll install Ruff through PyPI (or with your [preferred package manager](installation.md)):
 
 ```shell
 > pip install ruff
@@ -46,7 +46,7 @@ Ruff identified an unused import, which is a common error in Python code. Ruff c
 
 ```shell
 ❯ ruff check --fix .
-Found 1 error (1 fixed, 0 renumbersing).
+Found 1 error (1 fixed, 0 remaining).
 ```
 
 Running `git diff` shows the following:
@@ -240,9 +240,9 @@ This tutorial has focused on Ruff's command-line interface, but Ruff can also be
 [pre-commit](https://pre-commit.com) hook:
 
 ```yaml
-- repo: https://github.com/charliermarsh/ruff-pre-commit
+- repo: https://github.com/astral-sh/ruff-pre-commit
   # Ruff version.
-  rev: 'v0.0.261'
+  rev: v0.0.276
   hooks:
     - id: ruff
 ```
@@ -251,7 +251,7 @@ See [_Usage_](usage.md) for more.
 
 ## Editor Integrations
 
-Ruff can also be used as a [VS Code extension](https://github.com/charliermarsh/ruff-vscode) or
-alongside any other editor through the [Ruff LSP](https://github.com/charliermarsh/ruff-lsp).
+Ruff can also be used as a [VS Code extension](https://github.com/astral-sh/ruff-vscode) or
+alongside any other editor through the [Ruff LSP](https://github.com/astral-sh/ruff-lsp).
 
 See [_Editor Integrations_](editor-integrations.md).

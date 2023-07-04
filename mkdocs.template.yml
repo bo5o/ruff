@@ -1,7 +1,7 @@
 site_name: Ruff
 theme:
   name: material
-  logo: assets/ruff.svg
+  logo: assets/bolt.svg
   favicon: assets/ruff-favicon.png
   features:
     - navigation.instant
@@ -14,19 +14,17 @@ theme:
     - content.code.copy
   palette:
     - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: red
+      scheme: astral-light
       toggle:
         icon: material/weather-sunny
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: red
+      scheme: astral-dark
       toggle:
         icon: material/weather-night
         name: Switch to light mode
   custom_dir: .overrides
-repo_url: https://github.com/charliermarsh/ruff
+repo_url: https://github.com/astral-sh/ruff
 repo_name: ruff
 site_author: charliermarsh
 site_url: https://beta.ruff.rs/docs/
@@ -50,3 +48,5 @@ markdown_extensions:
       anchor_linenums: true
 plugins:
   - search
+extra_css:
+  - stylesheets/extra.css

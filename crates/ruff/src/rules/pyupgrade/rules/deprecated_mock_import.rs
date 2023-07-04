@@ -1,31 +1,53 @@
 use anyhow::Result;
 use libcst_native::{
-    AsName, AssignTargetExpression, Attribute, Codegen, CodegenState, Dot, Expression, Import,
-    ImportAlias, ImportFrom, ImportNames, Name, NameOrAttribute, ParenthesizableWhitespace,
+    AsName, AssignTargetExpression, Attribute, Dot, Expression, Import, ImportAlias, ImportFrom,
+    ImportNames, Name, NameOrAttribute, ParenthesizableWhitespace,
 };
 use log::error;
-use rustpython_parser::ast::{Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Expr, Ranged, Stmt};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use crate::autofix::codemods::CodegenStylist;
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::call_path::collect_call_path;
 use ruff_python_ast::source_code::{Locator, Stylist};
-use ruff_python_ast::types::Range;
 use ruff_python_ast::whitespace::indentation;
 
 use crate::checkers::ast::Checker;
-use crate::cst::matchers::{match_import, match_import_from, match_module};
+use crate::cst::matchers::{match_import, match_import_from, match_statement};
 use crate::registry::{AsRule, Rule};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum MockReference {
+pub(crate) enum MockReference {
     Import,
     Attribute,
 }
 
+/// ## What it does
+/// Checks for imports of the `mock` module that should be replaced with
+/// `unittest.mock`.
+///
+/// ## Why is this bad?
+/// Since Python 3.3, `mock` has been a part of the standard library as
+/// `unittest.mock`. The `mock` package is deprecated; use `unittest.mock`
+/// instead.
+///
+/// ## Example
+/// ```python
+/// import mock
+/// ```
+///
+/// Use instead:
+/// ```python
+/// from unittest import mock
+/// ```
+///
+/// ## References
+/// - [Python documentation: `unittest.mock`](https://docs.python.org/3/library/unittest.mock.html)
+/// - [PyPI: `mock`](https://pypi.org/project/mock/)
 #[violation]
 pub struct DeprecatedMockImport {
-    pub reference_type: MockReference,
+    reference_type: MockReference,
 }
 
 impl AlwaysAutofixableViolation for DeprecatedMockImport {
@@ -126,9 +148,9 @@ fn format_import(
     locator: &Locator,
     stylist: &Stylist,
 ) -> Result<String> {
-    let module_text = locator.slice(stmt);
-    let mut tree = match_module(module_text)?;
-    let mut import = match_import(&mut tree)?;
+    let module_text = locator.slice(stmt.range());
+    let mut tree = match_statement(module_text)?;
+    let import = match_import(&mut tree)?;
 
     let Import { names, .. } = import.clone();
     let (clean_aliases, mock_aliases) = clean_import_aliases(names);
@@ -138,14 +160,7 @@ fn format_import(
     } else {
         import.names = clean_aliases;
 
-        let mut state = CodegenState {
-            default_newline: &stylist.line_ending(),
-            default_indent: stylist.indentation(),
-            ..CodegenState::default()
-        };
-        tree.codegen(&mut state);
-
-        let mut content = state.to_string();
+        let mut content = tree.codegen_stylist(stylist);
         content.push_str(&stylist.line_ending());
         content.push_str(indent);
         content.push_str(&format_mocks(mock_aliases, indent, stylist));
@@ -160,9 +175,9 @@ fn format_import_from(
     locator: &Locator,
     stylist: &Stylist,
 ) -> Result<String> {
-    let module_text = locator.slice(stmt);
-    let mut tree = match_module(module_text).unwrap();
-    let mut import = match_import_from(&mut tree)?;
+    let module_text = locator.slice(stmt.range());
+    let mut tree = match_statement(module_text).unwrap();
+    let import = match_import_from(&mut tree)?;
 
     if let ImportFrom {
         names: ImportNames::Star(..),
@@ -188,13 +203,7 @@ fn format_import_from(
             lpar: vec![],
             rpar: vec![],
         })));
-        let mut state = CodegenState {
-            default_newline: &stylist.line_ending(),
-            default_indent: stylist.indentation(),
-            ..CodegenState::default()
-        };
-        tree.codegen(&mut state);
-        Ok(state.to_string())
+        Ok(tree.codegen_stylist(stylist))
     } else if let ImportFrom {
         names: ImportNames::Aliases(aliases),
         ..
@@ -225,14 +234,7 @@ fn format_import_from(
                 rpar: vec![],
             })));
 
-            let mut state = CodegenState {
-                default_newline: &stylist.line_ending(),
-                default_indent: stylist.indentation(),
-                ..CodegenState::default()
-            };
-            tree.codegen(&mut state);
-
-            let mut content = state.to_string();
+            let mut content = tree.codegen_stylist(stylist);
             if !mock_aliases.is_empty() {
                 content.push_str(&stylist.line_ending());
                 content.push_str(indent);
@@ -246,23 +248,22 @@ fn format_import_from(
 }
 
 /// UP026
-pub fn deprecated_mock_attribute(checker: &mut Checker, expr: &Expr) {
-    if let ExprKind::Attribute { value, .. } = &expr.node {
-        if collect_call_path(value)
-            .map_or(false, |call_path| call_path.as_slice() == ["mock", "mock"])
-        {
+pub(crate) fn deprecated_mock_attribute(checker: &mut Checker, expr: &Expr) {
+    if let Expr::Attribute(ast::ExprAttribute { value, .. }) = expr {
+        if collect_call_path(value).map_or(false, |call_path| {
+            matches!(call_path.as_slice(), ["mock", "mock"])
+        }) {
             let mut diagnostic = Diagnostic::new(
                 DeprecatedMockImport {
                     reference_type: MockReference::Attribute,
                 },
-                Range::from(value),
+                value.range(),
             );
             if checker.patch(diagnostic.kind.rule()) {
-                diagnostic.set_fix(Edit::replacement(
+                diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                     "mock".to_string(),
-                    value.location,
-                    value.end_location.unwrap(),
-                ));
+                    value.range(),
+                )));
             }
             checker.diagnostics.push(diagnostic);
         }
@@ -270,13 +271,13 @@ pub fn deprecated_mock_attribute(checker: &mut Checker, expr: &Expr) {
 }
 
 /// UP026
-pub fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
-    match &stmt.node {
-        StmtKind::Import { names } => {
+pub(crate) fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
+    match stmt {
+        Stmt::Import(ast::StmtImport { names, range: _ }) => {
             // Find all `mock` imports.
             if names
                 .iter()
-                .any(|name| name.node.name == "mock" || name.node.name == "mock.mock")
+                .any(|name| &name.name == "mock" || &name.name == "mock.mock")
             {
                 // Generate the fix, if needed, which is shared between all `mock` imports.
                 let content = if checker.patch(Rule::DeprecatedMockImport) {
@@ -297,31 +298,30 @@ pub fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
 
                 // Add a `Diagnostic` for each `mock` import.
                 for name in names {
-                    if name.node.name == "mock" || name.node.name == "mock.mock" {
+                    if &name.name == "mock" || &name.name == "mock.mock" {
                         let mut diagnostic = Diagnostic::new(
                             DeprecatedMockImport {
                                 reference_type: MockReference::Import,
                             },
-                            Range::from(name),
+                            name.range(),
                         );
                         if let Some(content) = content.as_ref() {
-                            diagnostic.set_fix(Edit::replacement(
+                            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
                                 content.clone(),
-                                stmt.location,
-                                stmt.end_location.unwrap(),
-                            ));
+                                stmt.range(),
+                            )));
                         }
                         checker.diagnostics.push(diagnostic);
                     }
                 }
             }
         }
-        StmtKind::ImportFrom {
+        Stmt::ImportFrom(ast::StmtImportFrom {
             module: Some(module),
             level,
             ..
-        } => {
-            if level.map_or(false, |level| level > 0) {
+        }) => {
+            if level.map_or(false, |level| level.to_u32() > 0) {
                 return;
             }
 
@@ -330,20 +330,14 @@ pub fn deprecated_mock_import(checker: &mut Checker, stmt: &Stmt) {
                     DeprecatedMockImport {
                         reference_type: MockReference::Import,
                     },
-                    Range::from(stmt),
+                    stmt.range(),
                 );
                 if checker.patch(diagnostic.kind.rule()) {
                     if let Some(indent) = indentation(checker.locator, stmt) {
-                        diagnostic.try_set_fix(|| {
-                            format_import_from(stmt, indent, checker.locator, checker.stylist).map(
-                                |content| {
-                                    Edit::replacement(
-                                        content,
-                                        stmt.location,
-                                        stmt.end_location.unwrap(),
-                                    )
-                                },
-                            )
+                        #[allow(deprecated)]
+                        diagnostic.try_set_fix_from_edit(|| {
+                            format_import_from(stmt, indent, checker.locator, checker.stylist)
+                                .map(|content| Edit::range_replacement(content, stmt.range()))
                         });
                     }
                 }

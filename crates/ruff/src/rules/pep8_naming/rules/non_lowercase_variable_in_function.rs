@@ -1,8 +1,8 @@
-use rustpython_parser::ast::{Expr, Stmt};
+use rustpython_parser::ast::{Expr, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_stdlib::str;
 
 use crate::checkers::ast::Checker;
 use crate::rules::pep8_naming::helpers;
@@ -18,9 +18,6 @@ use crate::rules::pep8_naming::helpers;
 /// > is allowed only in contexts where that's already the prevailing style (e.g. threading.py),
 /// > to retain backwards compatibility.
 ///
-/// ## Options
-/// - `pep8-naming.ignore-names`
-///
 /// ## Example
 /// ```python
 /// def my_function(a):
@@ -35,10 +32,13 @@ use crate::rules::pep8_naming::helpers;
 ///     return b
 /// ```
 ///
+/// ## Options
+/// - `pep8-naming.ignore-names`
+///
 /// [PEP 8]: https://peps.python.org/pep-0008/#function-and-variable-names
 #[violation]
 pub struct NonLowercaseVariableInFunction {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for NonLowercaseVariableInFunction {
@@ -50,7 +50,7 @@ impl Violation for NonLowercaseVariableInFunction {
 }
 
 /// N806
-pub fn non_lowercase_variable_in_function(
+pub(crate) fn non_lowercase_variable_in_function(
     checker: &mut Checker,
     expr: &Expr,
     stmt: &Stmt,
@@ -61,21 +61,21 @@ pub fn non_lowercase_variable_in_function(
         .pep8_naming
         .ignore_names
         .iter()
-        .any(|ignore_name| ignore_name == name)
+        .any(|ignore_name| ignore_name.matches(name))
     {
         return;
     }
 
-    if name.to_lowercase() != name
-        && !helpers::is_namedtuple_assignment(checker, stmt)
-        && !helpers::is_typeddict_assignment(checker, stmt)
-        && !helpers::is_type_var_assignment(checker, stmt)
+    if !str::is_lowercase(name)
+        && !helpers::is_named_tuple_assignment(stmt, checker.semantic())
+        && !helpers::is_typed_dict_assignment(stmt, checker.semantic())
+        && !helpers::is_type_var_assignment(stmt, checker.semantic())
     {
         checker.diagnostics.push(Diagnostic::new(
             NonLowercaseVariableInFunction {
                 name: name.to_string(),
             },
-            Range::from(expr),
+            expr.range(),
         ));
     }
 }

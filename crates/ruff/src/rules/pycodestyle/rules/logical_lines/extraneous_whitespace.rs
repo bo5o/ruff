@@ -1,16 +1,20 @@
-use rustpython_parser::ast::Location;
-
-use super::{LogicalLine, Whitespace};
-use ruff_diagnostics::DiagnosticKind;
-use ruff_diagnostics::Violation;
+use ruff_diagnostics::AlwaysAutofixableViolation;
+use ruff_diagnostics::Diagnostic;
+use ruff_diagnostics::Edit;
+use ruff_diagnostics::Fix;
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::token_kind::TokenKind;
+use ruff_text_size::TextRange;
+
+use crate::checkers::logical_lines::LogicalLinesContext;
+
+use super::{LogicalLine, Whitespace};
 
 /// ## What it does
 /// Checks for the use of extraneous whitespace after "(".
 ///
 /// ## Why is this bad?
-/// PEP 8 recommends the omission of whitespace in the following cases:
+/// [PEP 8] recommends the omission of whitespace in the following cases:
 /// - "Immediately inside parentheses, brackets or braces."
 /// - "Immediately before a comma, semicolon, or colon."
 ///
@@ -26,15 +30,22 @@ use ruff_python_ast::token_kind::TokenKind;
 /// spam(ham[1], {eggs: 2})
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#pet-peeves)
+/// [PEP 8]: https://peps.python.org/pep-0008/#pet-peeves
 #[violation]
-pub struct WhitespaceAfterOpenBracket;
+pub struct WhitespaceAfterOpenBracket {
+    symbol: char,
+}
 
-impl Violation for WhitespaceAfterOpenBracket {
+impl AlwaysAutofixableViolation for WhitespaceAfterOpenBracket {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Whitespace after '('")
+        let WhitespaceAfterOpenBracket { symbol } = self;
+        format!("Whitespace after '{symbol}'")
+    }
+
+    fn autofix_title(&self) -> String {
+        let WhitespaceAfterOpenBracket { symbol } = self;
+        format!("Remove whitespace before '{symbol}'")
     }
 }
 
@@ -42,7 +53,7 @@ impl Violation for WhitespaceAfterOpenBracket {
 /// Checks for the use of extraneous whitespace before ")".
 ///
 /// ## Why is this bad?
-/// PEP 8 recommends the omission of whitespace in the following cases:
+/// [PEP 8] recommends the omission of whitespace in the following cases:
 /// - "Immediately inside parentheses, brackets or braces."
 /// - "Immediately before a comma, semicolon, or colon."
 ///
@@ -58,15 +69,22 @@ impl Violation for WhitespaceAfterOpenBracket {
 /// spam(ham[1], {eggs: 2})
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#pet-peeves)
+/// [PEP 8]: https://peps.python.org/pep-0008/#pet-peeves
 #[violation]
-pub struct WhitespaceBeforeCloseBracket;
+pub struct WhitespaceBeforeCloseBracket {
+    symbol: char,
+}
 
-impl Violation for WhitespaceBeforeCloseBracket {
+impl AlwaysAutofixableViolation for WhitespaceBeforeCloseBracket {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Whitespace before ')'")
+        let WhitespaceBeforeCloseBracket { symbol } = self;
+        format!("Whitespace before '{symbol}'")
+    }
+
+    fn autofix_title(&self) -> String {
+        let WhitespaceBeforeCloseBracket { symbol } = self;
+        format!("Remove whitespace before '{symbol}'")
     }
 }
 
@@ -74,7 +92,7 @@ impl Violation for WhitespaceBeforeCloseBracket {
 /// Checks for the use of extraneous whitespace before ",", ";" or ":".
 ///
 /// ## Why is this bad?
-/// PEP 8 recommends the omission of whitespace in the following cases:
+/// [PEP 8] recommends the omission of whitespace in the following cases:
 /// - "Immediately inside parentheses, brackets or braces."
 /// - "Immediately before a comma, semicolon, or colon."
 ///
@@ -88,66 +106,116 @@ impl Violation for WhitespaceBeforeCloseBracket {
 /// if x == 4: print(x, y); x, y = y, x
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#pet-peeves)
+/// [PEP 8]: https://peps.python.org/pep-0008/#pet-peeves
 #[violation]
-pub struct WhitespaceBeforePunctuation;
+pub struct WhitespaceBeforePunctuation {
+    symbol: char,
+}
 
-impl Violation for WhitespaceBeforePunctuation {
+impl AlwaysAutofixableViolation for WhitespaceBeforePunctuation {
     #[derive_message_formats]
     fn message(&self) -> String {
-        format!("Whitespace before ',', ';', or ':'")
+        let WhitespaceBeforePunctuation { symbol } = self;
+        format!("Whitespace before '{symbol}'")
+    }
+
+    fn autofix_title(&self) -> String {
+        let WhitespaceBeforePunctuation { symbol } = self;
+        format!("Remove whitespace before '{symbol}'")
     }
 }
 
 /// E201, E202, E203
-pub(crate) fn extraneous_whitespace(line: &LogicalLine) -> Vec<(Location, DiagnosticKind)> {
-    let mut diagnostics = vec![];
-    let mut last_token: Option<TokenKind> = None;
+pub(crate) fn extraneous_whitespace(
+    line: &LogicalLine,
+    context: &mut LogicalLinesContext,
+    autofix_after_open_bracket: bool,
+    autofix_before_close_bracket: bool,
+    autofix_before_punctuation: bool,
+) {
+    let mut prev_token = None;
 
     for token in line.tokens() {
         let kind = token.kind();
-        match kind {
-            TokenKind::Lbrace | TokenKind::Lpar | TokenKind::Lsqb => {
-                if !matches!(line.trailing_whitespace(&token), Whitespace::None) {
-                    let end = token.end();
-                    diagnostics.push((
-                        Location::new(end.row(), end.column()),
-                        WhitespaceAfterOpenBracket.into(),
-                    ));
+        if let Some(symbol) = BracketOrPunctuation::from_kind(kind) {
+            match symbol {
+                BracketOrPunctuation::OpenBracket(symbol) => {
+                    let (trailing, trailing_len) = line.trailing_whitespace(token);
+                    if !matches!(trailing, Whitespace::None) {
+                        let mut diagnostic = Diagnostic::new(
+                            WhitespaceAfterOpenBracket { symbol },
+                            TextRange::at(token.end(), trailing_len),
+                        );
+                        if autofix_after_open_bracket {
+                            diagnostic
+                                .set_fix(Fix::automatic(Edit::range_deletion(diagnostic.range())));
+                        }
+                        context.push_diagnostic(diagnostic);
+                    }
                 }
-            }
-            TokenKind::Rbrace
-            | TokenKind::Rpar
-            | TokenKind::Rsqb
-            | TokenKind::Comma
-            | TokenKind::Semi
-            | TokenKind::Colon => {
-                let diagnostic_kind =
-                    if matches!(kind, TokenKind::Comma | TokenKind::Semi | TokenKind::Colon) {
-                        DiagnosticKind::from(WhitespaceBeforePunctuation)
-                    } else {
-                        DiagnosticKind::from(WhitespaceBeforeCloseBracket)
-                    };
-
-                if let (Whitespace::Single | Whitespace::Many | Whitespace::Tab, offset) =
-                    line.leading_whitespace(&token)
-                {
-                    if !matches!(last_token, Some(TokenKind::Comma)) {
-                        let start = token.start();
-                        diagnostics.push((
-                            Location::new(start.row(), start.column() - offset),
-                            diagnostic_kind,
-                        ));
+                BracketOrPunctuation::CloseBracket(symbol) => {
+                    if !matches!(prev_token, Some(TokenKind::Comma)) {
+                        if let (Whitespace::Single | Whitespace::Many | Whitespace::Tab, offset) =
+                            line.leading_whitespace(token)
+                        {
+                            let mut diagnostic = Diagnostic::new(
+                                WhitespaceBeforeCloseBracket { symbol },
+                                TextRange::at(token.start() - offset, offset),
+                            );
+                            if autofix_before_close_bracket {
+                                diagnostic.set_fix(Fix::automatic(Edit::range_deletion(
+                                    diagnostic.range(),
+                                )));
+                            }
+                            context.push_diagnostic(diagnostic);
+                        }
+                    }
+                }
+                BracketOrPunctuation::Punctuation(symbol) => {
+                    if !matches!(prev_token, Some(TokenKind::Comma)) {
+                        if let (Whitespace::Single | Whitespace::Many | Whitespace::Tab, offset) =
+                            line.leading_whitespace(token)
+                        {
+                            let mut diagnostic = Diagnostic::new(
+                                WhitespaceBeforePunctuation { symbol },
+                                TextRange::at(token.start() - offset, offset),
+                            );
+                            if autofix_before_punctuation {
+                                diagnostic.set_fix(Fix::automatic(Edit::range_deletion(
+                                    diagnostic.range(),
+                                )));
+                            }
+                            context.push_diagnostic(diagnostic);
+                        }
                     }
                 }
             }
-
-            _ => {}
         }
 
-        last_token = Some(kind);
+        prev_token = Some(kind);
     }
+}
 
-    diagnostics
+#[derive(Debug)]
+enum BracketOrPunctuation {
+    OpenBracket(char),
+    CloseBracket(char),
+    Punctuation(char),
+}
+
+impl BracketOrPunctuation {
+    fn from_kind(kind: TokenKind) -> Option<BracketOrPunctuation> {
+        match kind {
+            TokenKind::Lbrace => Some(BracketOrPunctuation::OpenBracket('{')),
+            TokenKind::Lpar => Some(BracketOrPunctuation::OpenBracket('(')),
+            TokenKind::Lsqb => Some(BracketOrPunctuation::OpenBracket('[')),
+            TokenKind::Rbrace => Some(BracketOrPunctuation::CloseBracket('}')),
+            TokenKind::Rpar => Some(BracketOrPunctuation::CloseBracket(')')),
+            TokenKind::Rsqb => Some(BracketOrPunctuation::CloseBracket(']')),
+            TokenKind::Comma => Some(BracketOrPunctuation::Punctuation(',')),
+            TokenKind::Colon => Some(BracketOrPunctuation::Punctuation(':')),
+            TokenKind::Semi => Some(BracketOrPunctuation::Punctuation(';')),
+            _ => None,
+        }
+    }
 }

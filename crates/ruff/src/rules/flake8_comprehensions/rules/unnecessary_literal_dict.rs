@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -13,7 +12,7 @@ use super::helpers;
 /// ## What it does
 /// Checks for unnecessary `list` or `tuple` literals.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// It's unnecessary to use a list or tuple literal within a call to `dict`.
 /// It can be rewritten as a dict literal (`{}`).
 ///
@@ -32,7 +31,7 @@ use super::helpers;
 /// ```
 #[violation]
 pub struct UnnecessaryLiteralDict {
-    pub obj_type: String,
+    obj_type: String,
 }
 
 impl AlwaysAutofixableViolation for UnnecessaryLiteralDict {
@@ -48,28 +47,30 @@ impl AlwaysAutofixableViolation for UnnecessaryLiteralDict {
 }
 
 /// C406 (`dict([(1, 2)])`)
-pub fn unnecessary_literal_dict(
+pub(crate) fn unnecessary_literal_dict(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords)
+    else {
         return;
     };
-    if !checker.ctx.is_builtin("dict") {
+    if !checker.semantic().is_builtin("dict") {
         return;
     }
     let (kind, elts) = match argument {
-        ExprKind::Tuple { elts, .. } => ("tuple", elts),
-        ExprKind::List { elts, .. } => ("list", elts),
+        Expr::Tuple(ast::ExprTuple { elts, .. }) => ("tuple", elts),
+        Expr::List(ast::ExprList { elts, .. }) => ("list", elts),
         _ => return,
     };
     // Accept `dict((1, 2), ...))` `dict([(1, 2), ...])`.
     if !elts
         .iter()
-        .all(|elt| matches!(&elt.node, ExprKind::Tuple { elts, .. } if elts.len() == 2))
+        .all(|elt| matches!(&elt, Expr::Tuple(ast::ExprTuple { elts, .. } )if elts.len() == 2))
     {
         return;
     }
@@ -77,12 +78,11 @@ pub fn unnecessary_literal_dict(
         UnnecessaryLiteralDict {
             obj_type: kind.to_string(),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
-            fixes::fix_unnecessary_literal_dict(checker.locator, checker.stylist, expr)
-        });
+        #[allow(deprecated)]
+        diagnostic.try_set_fix_from_edit(|| fixes::fix_unnecessary_literal_dict(checker, expr));
     }
     checker.diagnostics.push(diagnostic);
 }

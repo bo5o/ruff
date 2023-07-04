@@ -15,6 +15,7 @@ bytes("foo", **a)
 bytes(b"foo"
       b"bar")
 bytes("foo")
+f"{f'{str()}'}"
 
 # These become string or byte literals
 str()
@@ -25,3 +26,4 @@ bytes()
 bytes(b"foo")
 bytes(b"""
 foo""")
+f"{str()}"

@@ -3,26 +3,27 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use itertools::Either::{Left, Right};
-
 use annotate::annotate_imports;
+use block::{Block, Trailer};
+pub(crate) use categorize::categorize;
 use categorize::categorize_imports;
-pub use categorize::{categorize, ImportSection, ImportType};
+pub use categorize::{ImportSection, ImportType};
 use comments::Comment;
 use normalize::normalize_imports;
 use order::order_imports;
 use ruff_python_ast::source_code::{Locator, Stylist};
 use settings::RelativeImportsOrder;
 use sorting::cmp_either_import;
-use track::{Block, Trailer};
 use types::EitherImport::{Import, ImportFrom};
-use types::{AliasData, CommentSet, EitherImport, OrderedImportBlock, TrailingComma};
+use types::{AliasData, EitherImport, TrailingComma};
 
+use crate::line_width::{LineLength, LineWidth};
 use crate::rules::isort::categorize::KnownModules;
 use crate::rules::isort::types::ImportBlock;
 use crate::settings::types::PythonVersion;
 
 mod annotate;
+pub(crate) mod block;
 mod categorize;
 mod comments;
 mod format;
@@ -33,19 +34,18 @@ pub(crate) mod rules;
 pub mod settings;
 mod sorting;
 mod split;
-pub(crate) mod track;
 mod types;
 
 #[derive(Debug)]
-pub struct AnnotatedAliasData<'a> {
-    pub name: &'a str,
-    pub asname: Option<&'a str>,
-    pub atop: Vec<Comment<'a>>,
-    pub inline: Vec<Comment<'a>>,
+pub(crate) struct AnnotatedAliasData<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) asname: Option<&'a str>,
+    pub(crate) atop: Vec<Comment<'a>>,
+    pub(crate) inline: Vec<Comment<'a>>,
 }
 
 #[derive(Debug)]
-pub enum AnnotatedImport<'a> {
+pub(crate) enum AnnotatedImport<'a> {
     Import {
         names: Vec<AliasData<'a>>,
         atop: Vec<Comment<'a>>,
@@ -54,66 +54,20 @@ pub enum AnnotatedImport<'a> {
     ImportFrom {
         module: Option<&'a str>,
         names: Vec<AnnotatedAliasData<'a>>,
-        level: Option<usize>,
+        level: Option<u32>,
         atop: Vec<Comment<'a>>,
         inline: Vec<Comment<'a>>,
         trailing_comma: TrailingComma,
     },
 }
 
-fn force_single_line_imports<'a>(
-    block: OrderedImportBlock<'a>,
-    single_line_exclusions: &BTreeSet<String>,
-) -> OrderedImportBlock<'a> {
-    OrderedImportBlock {
-        import: block.import,
-        import_from: block
-            .import_from
-            .into_iter()
-            .flat_map(|(from_data, comment_set, trailing_comma, alias_data)| {
-                if from_data
-                    .module
-                    .map_or(false, |module| single_line_exclusions.contains(module))
-                {
-                    Left(std::iter::once((
-                        from_data,
-                        comment_set,
-                        trailing_comma,
-                        alias_data,
-                    )))
-                } else {
-                    Right(
-                        alias_data
-                            .into_iter()
-                            .enumerate()
-                            .map(move |(index, alias_data)| {
-                                (
-                                    from_data.clone(),
-                                    if index == 0 {
-                                        comment_set.clone()
-                                    } else {
-                                        CommentSet {
-                                            atop: vec![],
-                                            inline: comment_set.inline.clone(),
-                                        }
-                                    },
-                                    TrailingComma::Absent,
-                                    vec![alias_data],
-                                )
-                            }),
-                    )
-                }
-            })
-            .collect(),
-    }
-}
-
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-pub fn format_imports(
+pub(crate) fn format_imports(
     block: &Block,
     comments: Vec<Comment>,
     locator: &Locator,
-    line_length: usize,
+    line_length: LineLength,
+    indentation_width: LineWidth,
     stylist: &Stylist,
     src: &[PathBuf],
     package: Option<&Path>,
@@ -141,7 +95,12 @@ pub fn format_imports(
     let block = annotate_imports(&block.imports, comments, locator, split_on_trailing_comma);
 
     // Normalize imports (i.e., deduplicate, aggregate `from` imports).
-    let block = normalize_imports(block, combine_as_imports, force_single_line);
+    let block = normalize_imports(
+        block,
+        combine_as_imports,
+        force_single_line,
+        single_line_exclusions,
+    );
 
     // Categorize imports.
     let mut output = String::new();
@@ -150,17 +109,16 @@ pub fn format_imports(
         let block_output = format_import_block(
             block,
             line_length,
+            indentation_width,
             stylist,
             src,
             package,
-            force_single_line,
             force_sort_within_sections,
             force_wrap_aliases,
             force_to_top,
             known_modules,
             order_by_type,
             relative_imports_order,
-            single_line_exclusions,
             split_on_trailing_comma,
             classes,
             constants,
@@ -207,18 +165,17 @@ pub fn format_imports(
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn format_import_block(
     block: ImportBlock,
-    line_length: usize,
+    line_length: LineLength,
+    indentation_width: LineWidth,
     stylist: &Stylist,
     src: &[PathBuf],
     package: Option<&Path>,
-    force_single_line: bool,
     force_sort_within_sections: bool,
     force_wrap_aliases: bool,
     force_to_top: &BTreeSet<String>,
     known_modules: &KnownModules,
     order_by_type: bool,
     relative_imports_order: RelativeImportsOrder,
-    single_line_exclusions: &BTreeSet<String>,
     split_on_trailing_comma: bool,
     classes: &BTreeSet<String>,
     constants: &BTreeSet<String>,
@@ -246,7 +203,7 @@ fn format_import_block(
             continue;
         };
 
-        let mut imports = order_imports(
+        let imports = order_imports(
             import_block,
             order_by_type,
             relative_imports_order,
@@ -255,10 +212,6 @@ fn format_import_block(
             variables,
             force_to_top,
         );
-
-        if force_single_line {
-            imports = force_single_line_imports(imports, single_line_exclusions);
-        }
 
         let imports = {
             let mut imports = imports
@@ -315,6 +268,7 @@ fn format_import_block(
                         &comments,
                         &aliases,
                         line_length,
+                        indentation_width,
                         stylist,
                         force_wrap_aliases,
                         is_first_statement,
@@ -338,6 +292,7 @@ mod tests {
     use test_case::test_case;
 
     use crate::assert_messages;
+    use crate::message::Message;
     use crate::registry::Rule;
     use crate::rules::isort::categorize::{ImportSection, KnownModules};
     use crate::settings::Settings;
@@ -594,6 +549,24 @@ mod tests {
         Ok(())
     }
 
+    #[test_case(Path::new("propagate_inline_comments.py"))]
+    fn propagate_inline_comments(path: &Path) -> Result<()> {
+        let snapshot = format!("propagate_inline_comments_{}", path.to_string_lossy());
+        let diagnostics = test_path(
+            Path::new("isort").join(path).as_path(),
+            &Settings {
+                isort: super::settings::Settings {
+                    force_single_line: true,
+                    ..super::settings::Settings::default()
+                },
+                src: vec![test_resource_path("fixtures/isort")],
+                ..Settings::for_rule(Rule::UnsortedImports)
+            },
+        )?;
+        assert_messages!(snapshot, diagnostics);
+        Ok(())
+    }
+
     #[test_case(Path::new("order_by_type.py"))]
     fn order_by_type(path: &Path) -> Result<()> {
         let snapshot = format!("order_by_type_false_{}", path.to_string_lossy());
@@ -608,7 +581,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -636,7 +609,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -666,7 +639,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -694,7 +667,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -714,16 +687,21 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
 
+    #[test_case(Path::new("comment.py"))]
     #[test_case(Path::new("docstring.py"))]
     #[test_case(Path::new("docstring.pyi"))]
     #[test_case(Path::new("docstring_only.py"))]
-    #[test_case(Path::new("multiline_docstring.py"))]
+    #[test_case(Path::new("docstring_with_continuation.py"))]
+    #[test_case(Path::new("docstring_with_semicolon.py"))]
     #[test_case(Path::new("empty.py"))]
+    #[test_case(Path::new("existing_import.py"))]
+    #[test_case(Path::new("multiline_docstring.py"))]
+    #[test_case(Path::new("off.py"))]
     fn required_import(path: &Path) -> Result<()> {
         let snapshot = format!("required_import_{}", path.to_string_lossy());
         let diagnostics = test_path(
@@ -849,7 +827,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -874,7 +852,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -895,7 +873,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }
@@ -914,7 +892,7 @@ mod tests {
                 ..Settings::for_rule(Rule::UnsortedImports)
             },
         )?;
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics.sort_by_key(Message::start);
         assert_messages!(snapshot, diagnostics);
         Ok(())
     }

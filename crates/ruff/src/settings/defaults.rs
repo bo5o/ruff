@@ -7,14 +7,15 @@ use std::collections::HashSet;
 use super::types::{FilePattern, PythonVersion};
 use super::Settings;
 use crate::codes::{self, RuleCodePrefix};
+use crate::line_width::{LineLength, TabSize};
 use crate::registry::Linter;
 use crate::rule_selector::{prefix_to_selector, RuleSelector};
 use crate::rules::{
     flake8_annotations, flake8_bandit, flake8_bugbear, flake8_builtins, flake8_comprehensions,
-    flake8_errmsg, flake8_gettext, flake8_implicit_str_concat, flake8_import_conventions,
-    flake8_pytest_style, flake8_quotes, flake8_self, flake8_tidy_imports, flake8_type_checking,
-    flake8_unused_arguments, isort, mccabe, pep8_naming, pycodestyle, pydocstyle, pylint,
-    pyupgrade, wemake_python_styleguide,
+    flake8_copyright, flake8_errmsg, flake8_gettext, flake8_implicit_str_concat,
+    flake8_import_conventions, flake8_pytest_style, flake8_quotes, flake8_self,
+    flake8_tidy_imports, flake8_type_checking, flake8_unused_arguments, isort, mccabe, pep8_naming,
+    pycodestyle, pydocstyle, pyflakes, pylint, pyupgrade, wemake_python_styleguide,
 };
 use crate::settings::types::FilePatternSet;
 
@@ -24,8 +25,6 @@ pub const PREFIXES: &[RuleSelector] = &[
 ];
 
 pub const TARGET_VERSION: PythonVersion = PythonVersion::Py310;
-
-pub const LINE_LENGTH: usize = 88;
 
 pub const TASK_TAGS: &[&str] = &["TODO", "FIXME", "XXX"];
 
@@ -38,6 +37,7 @@ pub static EXCLUDE: Lazy<Vec<FilePattern>> = Lazy::new(|| {
         FilePattern::Builtin(".direnv"),
         FilePattern::Builtin(".eggs"),
         FilePattern::Builtin(".git"),
+        FilePattern::Builtin(".git-rewrite"),
         FilePattern::Builtin(".hg"),
         FilePattern::Builtin(".mypy_cache"),
         FilePattern::Builtin(".nox"),
@@ -57,8 +57,13 @@ pub static EXCLUDE: Lazy<Vec<FilePattern>> = Lazy::new(|| {
     ]
 });
 
-pub static INCLUDE: Lazy<Vec<FilePattern>> =
-    Lazy::new(|| vec![FilePattern::Builtin("*.py"), FilePattern::Builtin("*.pyi")]);
+pub static INCLUDE: Lazy<Vec<FilePattern>> = Lazy::new(|| {
+    vec![
+        FilePattern::Builtin("*.py"),
+        FilePattern::Builtin("*.pyi"),
+        FilePattern::Builtin("**/pyproject.toml"),
+    ]
+});
 
 impl Default for Settings {
     fn default() -> Self {
@@ -74,11 +79,11 @@ impl Default for Settings {
             force_exclude: false,
             ignore_init_module_imports: false,
             include: FilePatternSet::try_from_vec(INCLUDE.clone()).unwrap(),
-            line_length: LINE_LENGTH,
+            line_length: LineLength::default(),
+            tab_size: TabSize::default(),
             namespace_packages: vec![],
             per_file_ignores: vec![],
             respect_gitignore: true,
-            show_source: false,
             src: vec![path_dedot::CWD.clone()],
             project_root: path_dedot::CWD.clone(),
             target_version: TARGET_VERSION,
@@ -89,6 +94,7 @@ impl Default for Settings {
             flake8_bugbear: flake8_bugbear::settings::Settings::default(),
             flake8_builtins: flake8_builtins::settings::Settings::default(),
             flake8_comprehensions: flake8_comprehensions::settings::Settings::default(),
+            flake8_copyright: flake8_copyright::settings::Settings::default(),
             flake8_errmsg: flake8_errmsg::settings::Settings::default(),
             flake8_implicit_str_concat: flake8_implicit_str_concat::settings::Settings::default(),
             flake8_import_conventions: flake8_import_conventions::settings::Settings::default(),
@@ -96,7 +102,7 @@ impl Default for Settings {
             flake8_quotes: flake8_quotes::settings::Settings::default(),
             flake8_gettext: flake8_gettext::settings::Settings::default(),
             flake8_self: flake8_self::settings::Settings::default(),
-            flake8_tidy_imports: flake8_tidy_imports::Settings::default(),
+            flake8_tidy_imports: flake8_tidy_imports::settings::Settings::default(),
             flake8_type_checking: flake8_type_checking::settings::Settings::default(),
             flake8_unused_arguments: flake8_unused_arguments::settings::Settings::default(),
             isort: isort::settings::Settings::default(),
@@ -104,6 +110,7 @@ impl Default for Settings {
             pep8_naming: pep8_naming::settings::Settings::default(),
             pycodestyle: pycodestyle::settings::Settings::default(),
             pydocstyle: pydocstyle::settings::Settings::default(),
+            pyflakes: pyflakes::settings::Settings::default(),
             pylint: pylint::settings::Settings::default(),
             pyupgrade: pyupgrade::settings::Settings::default(),
             wemake_python_styleguide: wemake_python_styleguide::settings::Settings::default(),

@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -62,18 +61,20 @@ impl Violation for RaiseVanillaClass {
 }
 
 /// TRY002
-pub fn raise_vanilla_class(checker: &mut Checker, expr: &Expr) {
+pub(crate) fn raise_vanilla_class(checker: &mut Checker, expr: &Expr) {
     if checker
-        .ctx
-        .resolve_call_path(if let ExprKind::Call { func, .. } = &expr.node {
+        .semantic()
+        .resolve_call_path(if let Expr::Call(ast::ExprCall { func, .. }) = expr {
             func
         } else {
             expr
         })
-        .map_or(false, |call_path| call_path.as_slice() == ["", "Exception"])
+        .map_or(false, |call_path| {
+            matches!(call_path.as_slice(), ["", "Exception"])
+        })
     {
         checker
             .diagnostics
-            .push(Diagnostic::new(RaiseVanillaClass, Range::from(expr)));
+            .push(Diagnostic::new(RaiseVanillaClass, expr.range()));
     }
 }

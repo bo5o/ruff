@@ -1,11 +1,36 @@
-use rustpython_parser::ast::Expr;
+use rustpython_parser::ast::{Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
+/// ## What it does
+/// Check for usages of the deprecated `warn` method from the `logging` module.
+///
+/// ## Why is this bad?
+/// The `warn` method is deprecated. Use `warning` instead.
+///
+/// ## Example
+/// ```python
+/// import logging
+///
+///
+/// def foo():
+///     logging.warn("Something happened")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// import logging
+///
+///
+/// def foo():
+///     logging.warning("Something happened")
+/// ```
+///
+/// ## References
+/// - [Python documentation: `logger.Logger.warning`](https://docs.python.org/3/library/logging.html#logging.Logger.warning)
 #[violation]
 pub struct DeprecatedLogWarn;
 
@@ -17,16 +42,16 @@ impl Violation for DeprecatedLogWarn {
 }
 
 /// PGH002
-pub fn deprecated_log_warn(checker: &mut Checker, func: &Expr) {
+pub(crate) fn deprecated_log_warn(checker: &mut Checker, func: &Expr) {
     if checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["logging", "warn"]
+            matches!(call_path.as_slice(), ["logging", "warn"])
         })
     {
         checker
             .diagnostics
-            .push(Diagnostic::new(DeprecatedLogWarn, Range::from(func)));
+            .push(Diagnostic::new(DeprecatedLogWarn, func.range()));
     }
 }

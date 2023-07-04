@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -14,7 +13,7 @@ use super::helpers;
 /// Checks for `set` calls that take unnecessary `list` or `tuple` literals
 /// as arguments.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// It's unnecessary to use a list or tuple literal within a call to `set`.
 /// Instead, the expression can be rewritten as a set literal.
 ///
@@ -33,7 +32,7 @@ use super::helpers;
 /// ```
 #[violation]
 pub struct UnnecessaryLiteralSet {
-    pub obj_type: String,
+    obj_type: String,
 }
 
 impl AlwaysAutofixableViolation for UnnecessaryLiteralSet {
@@ -49,34 +48,35 @@ impl AlwaysAutofixableViolation for UnnecessaryLiteralSet {
 }
 
 /// C405 (`set([1, 2])`)
-pub fn unnecessary_literal_set(
+pub(crate) fn unnecessary_literal_set(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("set", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("set", func, args, keywords)
+    else {
         return;
     };
-    if !checker.ctx.is_builtin("set") {
+    if !checker.semantic().is_builtin("set") {
         return;
     }
     let kind = match argument {
-        ExprKind::List { .. } => "list",
-        ExprKind::Tuple { .. } => "tuple",
+        Expr::List(_) => "list",
+        Expr::Tuple(_) => "tuple",
         _ => return,
     };
     let mut diagnostic = Diagnostic::new(
         UnnecessaryLiteralSet {
             obj_type: kind.to_string(),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
-            fixes::fix_unnecessary_literal_set(checker.locator, checker.stylist, expr)
-        });
+        #[allow(deprecated)]
+        diagnostic.try_set_fix_from_edit(|| fixes::fix_unnecessary_literal_set(checker, expr));
     }
     checker.diagnostics.push(diagnostic);
 }

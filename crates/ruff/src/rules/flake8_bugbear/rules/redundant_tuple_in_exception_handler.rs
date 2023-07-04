@@ -1,16 +1,40 @@
-use rustpython_parser::ast::{Excepthandler, ExcepthandlerKind, ExprKind};
+use rustpython_parser::ast::{self, ExceptHandler, Expr, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::unparse_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for single-element tuples in exception handlers (e.g.,
+/// `except (ValueError,):`).
+///
+/// ## Why is this bad?
+/// A tuple with a single element can be more concisely and idiomatically
+/// expressed as a single value.
+///
+/// ## Example
+/// ```python
+/// try:
+///     ...
+/// except (ValueError,):
+///     ...
+/// ```
+///
+/// Use instead:
+/// ```python
+/// try:
+///     ...
+/// except ValueError:
+///     ...
+/// ```
+///
+/// ## References
+/// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
 #[violation]
 pub struct RedundantTupleInExceptionHandler {
-    pub name: String,
+    name: String,
 }
 
 impl AlwaysAutofixableViolation for RedundantTupleInExceptionHandler {
@@ -30,12 +54,19 @@ impl AlwaysAutofixableViolation for RedundantTupleInExceptionHandler {
 }
 
 /// B013
-pub fn redundant_tuple_in_exception_handler(checker: &mut Checker, handlers: &[Excepthandler]) {
+pub(crate) fn redundant_tuple_in_exception_handler(
+    checker: &mut Checker,
+    handlers: &[ExceptHandler],
+) {
     for handler in handlers {
-        let ExcepthandlerKind::ExceptHandler { type_: Some(type_), .. } = &handler.node else {
+        let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
+            type_: Some(type_),
+            ..
+        }) = handler
+        else {
             continue;
         };
-        let ExprKind::Tuple { elts, .. } = &type_.node else {
+        let Expr::Tuple(ast::ExprTuple { elts, .. }) = type_.as_ref() else {
             continue;
         };
         let [elt] = &elts[..] else {
@@ -43,16 +74,16 @@ pub fn redundant_tuple_in_exception_handler(checker: &mut Checker, handlers: &[E
         };
         let mut diagnostic = Diagnostic::new(
             RedundantTupleInExceptionHandler {
-                name: unparse_expr(elt, checker.stylist),
+                name: checker.generator().expr(elt),
             },
-            Range::from(type_),
+            type_.range(),
         );
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.set_fix(Edit::replacement(
-                unparse_expr(elt, checker.stylist),
-                type_.location,
-                type_.end_location.unwrap(),
-            ));
+            #[allow(deprecated)]
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                checker.generator().expr(elt),
+                type_.range(),
+            )));
         }
         checker.diagnostics.push(diagnostic);
     }

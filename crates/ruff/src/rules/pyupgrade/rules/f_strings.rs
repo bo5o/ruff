@@ -1,19 +1,41 @@
+use std::borrow::Cow;
+
+use ruff_text_size::TextRange;
 use rustc_hash::FxHashMap;
-use rustpython_common::format::{
+use rustpython_format::{
     FieldName, FieldNamePart, FieldType, FormatPart, FormatString, FromTemplate,
 };
-use rustpython_parser::ast::{Constant, Expr, ExprKind, KeywordData, Location};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
+use ruff_python_ast::source_code::Locator;
 use ruff_python_ast::str::{is_implicit_concatenation, leading_quote, trailing_quote};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 use crate::rules::pyflakes::format::FormatSummary;
 use crate::rules::pyupgrade::helpers::curly_escape;
 
+/// ## What it does
+/// Checks for `str#format` calls that can be replaced with f-strings.
+///
+/// ## Why is this bad?
+/// f-strings are more readable and generally preferred over `str#format`
+/// calls.
+///
+/// ## Example
+/// ```python
+/// "{}".format(foo)
+/// ```
+///
+/// Use instead:
+/// ```python
+/// f"{foo}"
+/// ```
+///
+/// ## References
+/// - [Python documentation: f-strings](https://docs.python.org/3/reference/lexical_analysis.html#f-strings)
 #[violation]
 pub struct FString;
 
@@ -34,30 +56,32 @@ impl AlwaysAutofixableViolation for FString {
 /// respectively.
 #[derive(Debug)]
 struct FormatSummaryValues<'a> {
-    args: Vec<String>,
-    kwargs: FxHashMap<&'a str, String>,
+    args: Vec<&'a Expr>,
+    kwargs: FxHashMap<&'a str, &'a Expr>,
 }
 
 impl<'a> FormatSummaryValues<'a> {
-    fn try_from_expr(checker: &'a Checker, expr: &'a Expr) -> Option<Self> {
-        let mut extracted_args: Vec<String> = Vec::new();
-        let mut extracted_kwargs: FxHashMap<&str, String> = FxHashMap::default();
-        if let ExprKind::Call { args, keywords, .. } = &expr.node {
+    fn try_from_expr(expr: &'a Expr, locator: &'a Locator) -> Option<Self> {
+        let mut extracted_args: Vec<&Expr> = Vec::new();
+        let mut extracted_kwargs: FxHashMap<&str, &Expr> = FxHashMap::default();
+        if let Expr::Call(ast::ExprCall { args, keywords, .. }) = expr {
             for arg in args {
-                let arg = checker.locator.slice(arg);
-                if contains_invalids(arg) {
+                if contains_invalids(locator.slice(arg.range())) {
                     return None;
                 }
-                extracted_args.push(arg.to_string());
+                extracted_args.push(arg);
             }
             for keyword in keywords {
-                let KeywordData { arg, value } = &keyword.node;
+                let Keyword {
+                    arg,
+                    value,
+                    range: _,
+                } = keyword;
                 if let Some(key) = arg {
-                    let kwarg = checker.locator.slice(value);
-                    if contains_invalids(kwarg) {
+                    if contains_invalids(locator.slice(value.range())) {
                         return None;
                     }
-                    extracted_kwargs.insert(key, kwarg.to_string());
+                    extracted_kwargs.insert(key, value);
                 }
             }
         }
@@ -72,7 +96,7 @@ impl<'a> FormatSummaryValues<'a> {
         })
     }
 
-    fn consume_next(&mut self) -> Option<String> {
+    fn consume_next(&mut self) -> Option<&Expr> {
         if self.args.is_empty() {
             None
         } else {
@@ -80,7 +104,7 @@ impl<'a> FormatSummaryValues<'a> {
         }
     }
 
-    fn consume_arg(&mut self, index: usize) -> Option<String> {
+    fn consume_arg(&mut self, index: usize) -> Option<&Expr> {
         if self.args.len() > index {
             Some(self.args.remove(index))
         } else {
@@ -88,13 +112,13 @@ impl<'a> FormatSummaryValues<'a> {
         }
     }
 
-    fn consume_kwarg(&mut self, key: &str) -> Option<String> {
+    fn consume_kwarg(&mut self, key: &str) -> Option<&Expr> {
         self.kwargs.remove(key)
     }
 }
 
-/// Return `true` if the string contains characters that are forbidden in
-/// argument identifier.
+/// Return `true` if the string contains characters that are forbidden by
+/// argument identifiers.
 fn contains_invalids(string: &str) -> bool {
     string.contains('*')
         || string.contains('\'')
@@ -102,29 +126,82 @@ fn contains_invalids(string: &str) -> bool {
         || string.contains("await")
 }
 
+enum FormatContext {
+    /// The expression is used as a bare format spec (e.g., `{x}`).
+    Bare,
+    /// The expression is used with conversion flags, or attribute or subscript access
+    /// (e.g., `{x!r}`, `{x.y}`, `{x[y]}`).
+    Accessed,
+}
+
+/// Given an [`Expr`], format it for use in a formatted expression within an f-string.
+fn formatted_expr<'a>(expr: &Expr, context: FormatContext, locator: &Locator<'a>) -> Cow<'a, str> {
+    let text = locator.slice(expr.range());
+    let parenthesize = match (context, expr) {
+        // E.g., `x + y` should be parenthesized in `f"{(x + y)[0]}"`.
+        (
+            FormatContext::Accessed,
+            Expr::BinOp(_)
+            | Expr::UnaryOp(_)
+            | Expr::BoolOp(_)
+            | Expr::NamedExpr(_)
+            | Expr::Compare(_)
+            | Expr::IfExp(_)
+            | Expr::Lambda(_)
+            | Expr::Await(_)
+            | Expr::Yield(_)
+            | Expr::YieldFrom(_)
+            | Expr::Starred(_),
+        ) => true,
+        // E.g., `12` should be parenthesized in `f"{(12).real}"`.
+        (
+            FormatContext::Accessed,
+            Expr::Constant(ast::ExprConstant {
+                value: Constant::Int(..),
+                ..
+            }),
+        ) => text.chars().all(|c| c.is_ascii_digit()),
+        // E.g., `{x, y}` should be parenthesized in `f"{(x, y)}"`.
+        (
+            _,
+            Expr::GeneratorExp(_)
+            | Expr::Dict(_)
+            | Expr::Set(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_),
+        ) => true,
+        _ => false,
+    };
+    if parenthesize && !text.starts_with('(') && !text.ends_with(')') {
+        Cow::Owned(format!("({text})"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Generate an f-string from an [`Expr`].
-fn try_convert_to_f_string(checker: &Checker, expr: &Expr) -> Option<String> {
-    let ExprKind::Call { func, .. } = &expr.node else {
+fn try_convert_to_f_string(expr: &Expr, locator: &Locator) -> Option<String> {
+    let Expr::Call(ast::ExprCall { func, .. }) = expr else {
         return None;
     };
-    let ExprKind::Attribute { value, .. } = &func.node else {
+    let Expr::Attribute(ast::ExprAttribute { value, .. }) = func.as_ref() else {
         return None;
     };
     if !matches!(
-        &value.node,
-        ExprKind::Constant {
+        value.as_ref(),
+        Expr::Constant(ast::ExprConstant {
             value: Constant::Str(..),
             ..
-        },
+        }),
     ) {
         return None;
     };
 
-    let Some(mut summary) = FormatSummaryValues::try_from_expr(checker, expr) else {
+    let Some(mut summary) = FormatSummaryValues::try_from_expr(expr, locator) else {
         return None;
     };
 
-    let contents = checker.locator.slice(value);
+    let contents = locator.slice(value.range());
 
     // Skip implicit string concatenations.
     if is_implicit_concatenation(contents) {
@@ -167,26 +244,20 @@ fn try_convert_to_f_string(checker: &Checker, expr: &Expr) -> Option<String> {
                 converted.push('{');
 
                 let field = FieldName::parse(&field_name).ok()?;
-                match field.field_type {
-                    FieldType::Auto => {
-                        let Some(arg) = summary.consume_next() else {
-                            return None;
-                        };
-                        converted.push_str(&arg);
-                    }
-                    FieldType::Index(index) => {
-                        let Some(arg) = summary.consume_arg(index) else {
-                            return None;
-                        };
-                        converted.push_str(&arg);
-                    }
-                    FieldType::Keyword(name) => {
-                        let Some(arg) = summary.consume_kwarg(&name) else {
-                            return None;
-                        };
-                        converted.push_str(&arg);
-                    }
-                }
+                let arg = match field.field_type {
+                    FieldType::Auto => summary.consume_next(),
+                    FieldType::Index(index) => summary.consume_arg(index),
+                    FieldType::Keyword(name) => summary.consume_kwarg(&name),
+                }?;
+                converted.push_str(&formatted_expr(
+                    arg,
+                    if field.parts.is_empty() {
+                        FormatContext::Bare
+                    } else {
+                        FormatContext::Accessed
+                    },
+                    locator,
+                ));
 
                 for part in field.parts {
                     match part {
@@ -200,8 +271,15 @@ fn try_convert_to_f_string(checker: &Checker, expr: &Expr) -> Option<String> {
                             converted.push(']');
                         }
                         FieldNamePart::StringIndex(index) => {
+                            let quote = match *trailing_quote {
+                                "'" | "'''" | "\"\"\"" => '"',
+                                "\"" => '\'',
+                                _ => unreachable!("invalid trailing quote"),
+                            };
                             converted.push('[');
+                            converted.push(quote);
                             converted.push_str(&index);
+                            converted.push(quote);
                             converted.push(']');
                         }
                     }
@@ -241,41 +319,39 @@ pub(crate) fn f_strings(checker: &mut Checker, summary: &FormatSummary, expr: &E
     }
 
     // Avoid refactoring multi-line strings.
-    if expr.location.row() != expr.end_location.unwrap().row() {
+    if checker.locator.contains_line_break(expr.range()) {
         return;
     }
 
     // Currently, the only issue we know of is in LibCST:
     // https://github.com/Instagram/LibCST/issues/846
-    let Some(mut contents) = try_convert_to_f_string(checker, expr) else {
+    let Some(mut contents) = try_convert_to_f_string(expr, checker.locator) else {
         return;
     };
 
     // Avoid refactors that increase the resulting string length.
-    let existing = checker.locator.slice(expr);
+    let existing = checker.locator.slice(expr.range());
     if contents.len() > existing.len() {
         return;
     }
 
     // If necessary, add a space between any leading keyword (`return`, `yield`, `assert`, etc.)
     // and the string. For example, `return"foo"` is valid, but `returnf"foo"` is not.
-    if expr.location.column() > 0 {
-        let existing = checker.locator.slice(Range::new(
-            Location::new(expr.location.row(), expr.location.column() - 1),
-            expr.end_location.unwrap(),
-        ));
-        if existing.chars().next().unwrap().is_ascii_alphabetic() {
-            contents.insert(0, ' ');
-        }
+    let existing = checker.locator.slice(TextRange::up_to(expr.start()));
+    if existing
+        .chars()
+        .last()
+        .map_or(false, |char| char.is_ascii_alphabetic())
+    {
+        contents.insert(0, ' ');
     }
 
-    let mut diagnostic = Diagnostic::new(FString, Range::from(expr));
+    let mut diagnostic = Diagnostic::new(FString, expr.range());
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
+        diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
             contents,
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+            expr.range(),
+        )));
     };
     checker.diagnostics.push(diagnostic);
 }

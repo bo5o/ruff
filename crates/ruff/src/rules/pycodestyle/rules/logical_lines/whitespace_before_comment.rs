@@ -1,11 +1,13 @@
-use super::LogicalLineTokens;
-use ruff_diagnostics::DiagnosticKind;
+use ruff_text_size::{TextLen, TextRange, TextSize};
+
 use ruff_diagnostics::Violation;
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::source_code::Locator;
 use ruff_python_ast::token_kind::TokenKind;
-use ruff_python_ast::types::Range;
-use rustpython_parser::ast::Location;
+use ruff_python_whitespace::PythonWhitespace;
+
+use crate::checkers::logical_lines::LogicalLinesContext;
+use crate::rules::pycodestyle::rules::logical_lines::LogicalLine;
 
 /// ## What it does
 /// Checks if inline comments are separated by at least two spaces.
@@ -57,8 +59,7 @@ impl Violation for TooFewSpacesBeforeInlineComment {
 /// x = x + 1    # Increment x
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#comments)
+/// [PEP 8]: https://peps.python.org/pep-0008/#comments
 #[violation]
 pub struct NoSpaceAfterInlineComment;
 
@@ -90,8 +91,7 @@ impl Violation for NoSpaceAfterInlineComment {
 /// # \xa0- Block comment list
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#comments)
+/// [PEP 8]: https://peps.python.org/pep-0008/#comments
 #[violation]
 pub struct NoSpaceAfterBlockComment;
 
@@ -114,7 +114,6 @@ impl Violation for NoSpaceAfterBlockComment {
 /// ## Example
 /// ```python
 /// ### Block comment
-///
 /// ```
 ///
 /// Use instead:
@@ -124,8 +123,7 @@ impl Violation for NoSpaceAfterBlockComment {
 /// # \xa0- Block comment list
 /// ```
 ///
-/// ## References
-/// - [PEP 8](https://peps.python.org/pep-0008/#comments)
+/// [PEP 8]: https://peps.python.org/pep-0008/#comments
 #[violation]
 pub struct MultipleLeadingHashesForBlockComment;
 
@@ -138,35 +136,35 @@ impl Violation for MultipleLeadingHashesForBlockComment {
 
 /// E261, E262, E265, E266
 pub(crate) fn whitespace_before_comment(
-    tokens: &LogicalLineTokens,
+    line: &LogicalLine,
     locator: &Locator,
-) -> Vec<(Range, DiagnosticKind)> {
-    let mut diagnostics = vec![];
-    let mut prev_end = Location::new(0, 0);
-    for token in tokens {
+    context: &mut LogicalLinesContext,
+) {
+    let mut prev_end = TextSize::default();
+    for token in line.tokens() {
         let kind = token.kind();
 
         if let TokenKind::Comment = kind {
-            let (start, end) = token.range();
-            let line = locator.slice(Range::new(
-                Location::new(start.row(), 0),
-                Location::new(start.row(), start.column()),
+            let range = token.range();
+
+            let line_text = locator.slice(TextRange::new(
+                locator.line_start(range.start()),
+                range.start(),
             ));
+            let token_text = locator.slice(range);
 
-            let text = locator.slice(Range::new(start, end));
-
-            let is_inline_comment = !line.trim().is_empty();
+            let is_inline_comment = !line_text.trim_whitespace().is_empty();
             if is_inline_comment {
-                if prev_end.row() == start.row() && start.column() < prev_end.column() + 2 {
-                    diagnostics.push((
-                        Range::new(prev_end, start),
-                        TooFewSpacesBeforeInlineComment.into(),
-                    ));
+                if range.start() - prev_end < "  ".text_len() {
+                    context.push(
+                        TooFewSpacesBeforeInlineComment,
+                        TextRange::new(prev_end, range.start()),
+                    );
                 }
             }
 
             // Split into the portion before and after the first space.
-            let mut parts = text.splitn(2, ' ');
+            let mut parts = token_text.splitn(2, ' ');
             let symbol = parts.next().unwrap_or("");
             let comment = parts.next().unwrap_or("");
 
@@ -179,17 +177,14 @@ pub(crate) fn whitespace_before_comment(
             if is_inline_comment {
                 if bad_prefix.is_some() || comment.chars().next().map_or(false, char::is_whitespace)
                 {
-                    diagnostics.push((Range::new(start, end), NoSpaceAfterInlineComment.into()));
+                    context.push(NoSpaceAfterInlineComment, range);
                 }
             } else if let Some(bad_prefix) = bad_prefix {
-                if bad_prefix != '!' || start.row() > 1 {
+                if bad_prefix != '!' || !line.is_start_of_file() {
                     if bad_prefix != '#' {
-                        diagnostics.push((Range::new(start, end), NoSpaceAfterBlockComment.into()));
+                        context.push(NoSpaceAfterBlockComment, range);
                     } else if !comment.is_empty() {
-                        diagnostics.push((
-                            Range::new(start, end),
-                            MultipleLeadingHashesForBlockComment.into(),
-                        ));
+                        context.push(MultipleLeadingHashesForBlockComment, range);
                     }
                 }
             }
@@ -197,5 +192,4 @@ pub(crate) fn whitespace_before_comment(
             prev_end = token.end();
         }
     }
-    diagnostics
 }

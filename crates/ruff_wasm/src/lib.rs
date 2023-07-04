@@ -1,27 +1,24 @@
 use std::path::Path;
 
-use rustpython_parser::ast::Location;
 use rustpython_parser::lexer::LexResult;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use ruff::directives;
+use ruff::line_width::{LineLength, TabSize};
 use ruff::linter::{check_path, LinterResult};
 use ruff::registry::AsRule;
 use ruff::rules::{
     flake8_annotations, flake8_bandit, flake8_bugbear, flake8_builtins, flake8_comprehensions,
-    flake8_errmsg, flake8_gettext, flake8_implicit_str_concat, flake8_import_conventions,
-    flake8_pytest_style, flake8_quotes, flake8_self, flake8_tidy_imports, flake8_type_checking,
-    flake8_unused_arguments, isort, mccabe, pep8_naming, pycodestyle, pydocstyle, pylint,
-    pyupgrade, wemake_python_styleguide,
+    flake8_copyright, flake8_errmsg, flake8_gettext, flake8_implicit_str_concat,
+    flake8_import_conventions, flake8_pytest_style, flake8_quotes, flake8_self,
+    flake8_tidy_imports, flake8_type_checking, flake8_unused_arguments, isort, mccabe, pep8_naming,
+    pycodestyle, pydocstyle, pyflakes, pylint, pyupgrade, wemake_python_styleguide,
 };
 use ruff::settings::configuration::Configuration;
 use ruff::settings::options::Options;
 use ruff::settings::{defaults, flags, Settings};
-use ruff_diagnostics::Edit;
-use ruff_python_ast::source_code::{Indexer, Locator, Stylist};
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+use ruff_python_ast::source_code::{Indexer, Locator, SourceLocation, Stylist};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &'static str = r#"
@@ -39,7 +36,7 @@ export interface Diagnostic {
     fix: {
         message: string | null;
         edits: {
-            content: string;
+            content: string | null;
             location: {
                 row: number;
                 column: number;
@@ -54,18 +51,25 @@ export interface Diagnostic {
 "#;
 
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ExpandedFix {
-    message: Option<String>,
-    edits: Vec<Edit>,
-}
-
-#[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ExpandedMessage {
     pub code: String,
     pub message: String,
-    pub location: Location,
-    pub end_location: Location,
+    pub location: SourceLocation,
+    pub end_location: SourceLocation,
     pub fix: Option<ExpandedFix>,
+}
+
+#[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ExpandedFix {
+    message: Option<String>,
+    edits: Vec<ExpandedEdit>,
+}
+
+#[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
+struct ExpandedEdit {
+    location: SourceLocation,
+    end_location: SourceLocation,
+    content: Option<String>,
 }
 
 #[wasm_bindgen(start)]
@@ -87,7 +91,7 @@ pub fn run() {
 #[wasm_bindgen]
 #[allow(non_snake_case)]
 pub fn currentVersion() -> JsValue {
-    JsValue::from(VERSION)
+    JsValue::from(ruff::VERSION)
 }
 
 #[wasm_bindgen]
@@ -98,11 +102,14 @@ pub fn defaultSettings() -> Result<JsValue, JsValue> {
         allowed_confusables: Some(Vec::default()),
         builtins: Some(Vec::default()),
         dummy_variable_rgx: Some(defaults::DUMMY_VARIABLE_RGX.as_str().to_string()),
+        extend_fixable: Some(Vec::default()),
         extend_ignore: Some(Vec::default()),
         extend_select: Some(Vec::default()),
+        extend_unfixable: Some(Vec::default()),
         external: Some(Vec::default()),
         ignore: Some(Vec::default()),
-        line_length: Some(defaults::LINE_LENGTH),
+        line_length: Some(LineLength::default()),
+        tab_size: Some(TabSize::default()),
         select: Some(defaults::PREFIXES.to_vec()),
         target_version: Some(defaults::TARGET_VERSION),
         // Ignore a bunch of options that don't make sense in a single-file editor.
@@ -111,6 +118,7 @@ pub fn defaultSettings() -> Result<JsValue, JsValue> {
         extend: None,
         extend_exclude: None,
         extend_include: None,
+        extend_per_file_ignores: None,
         fix: None,
         fix_only: None,
         fixable: None,
@@ -128,17 +136,14 @@ pub fn defaultSettings() -> Result<JsValue, JsValue> {
         task_tags: None,
         typing_modules: None,
         unfixable: None,
-        update_check: None,
         // Use default options for all plugins.
         flake8_annotations: Some(flake8_annotations::settings::Settings::default().into()),
         flake8_bandit: Some(flake8_bandit::settings::Settings::default().into()),
         flake8_bugbear: Some(flake8_bugbear::settings::Settings::default().into()),
         flake8_builtins: Some(flake8_builtins::settings::Settings::default().into()),
         flake8_comprehensions: Some(flake8_comprehensions::settings::Settings::default().into()),
+        flake8_copyright: Some(flake8_copyright::settings::Settings::default().into()),
         flake8_errmsg: Some(flake8_errmsg::settings::Settings::default().into()),
-        flake8_pytest_style: Some(flake8_pytest_style::settings::Settings::default().into()),
-        flake8_quotes: Some(flake8_quotes::settings::Settings::default().into()),
-        flake8_self: Some(flake8_self::settings::Settings::default().into()),
         flake8_gettext: Some(flake8_gettext::settings::Settings::default().into()),
         flake8_implicit_str_concat: Some(
             flake8_implicit_str_concat::settings::Settings::default().into(),
@@ -146,7 +151,10 @@ pub fn defaultSettings() -> Result<JsValue, JsValue> {
         flake8_import_conventions: Some(
             flake8_import_conventions::settings::Settings::default().into(),
         ),
-        flake8_tidy_imports: Some(flake8_tidy_imports::Settings::default().into()),
+        flake8_pytest_style: Some(flake8_pytest_style::settings::Settings::default().into()),
+        flake8_quotes: Some(flake8_quotes::settings::Settings::default().into()),
+        flake8_self: Some(flake8_self::settings::Settings::default().into()),
+        flake8_tidy_imports: Some(flake8_tidy_imports::settings::Settings::default().into()),
         flake8_type_checking: Some(flake8_type_checking::settings::Settings::default().into()),
         flake8_unused_arguments: Some(
             flake8_unused_arguments::settings::Settings::default().into(),
@@ -156,6 +164,7 @@ pub fn defaultSettings() -> Result<JsValue, JsValue> {
         pep8_naming: Some(pep8_naming::settings::Settings::default().into()),
         pycodestyle: Some(pycodestyle::settings::Settings::default().into()),
         pydocstyle: Some(pydocstyle::settings::Settings::default().into()),
+        pyflakes: Some(pyflakes::settings::Settings::default().into()),
         pylint: Some(pylint::settings::Settings::default().into()),
         pyupgrade: Some(pyupgrade::settings::Settings::default().into()),
         wemake_python_styleguide: Some(
@@ -183,10 +192,11 @@ pub fn check(contents: &str, options: JsValue) -> Result<JsValue, JsValue> {
     let stylist = Stylist::from_tokens(&tokens, &locator);
 
     // Extra indices from the code.
-    let indexer: Indexer = tokens.as_slice().into();
+    let indexer = Indexer::from_tokens(&tokens, &locator);
 
     // Extract the `# noqa` and `# isort: skip` directives from the source.
-    let directives = directives::extract_directives(&tokens, directives::Flags::empty());
+    let directives =
+        directives::extract_directives(&tokens, directives::Flags::empty(), &locator, &indexer);
 
     // Generate checks.
     let LinterResult {
@@ -195,7 +205,6 @@ pub fn check(contents: &str, options: JsValue) -> Result<JsValue, JsValue> {
     } = check_path(
         Path::new("<filename>"),
         None,
-        contents,
         tokens,
         &locator,
         &stylist,
@@ -203,24 +212,35 @@ pub fn check(contents: &str, options: JsValue) -> Result<JsValue, JsValue> {
         &directives,
         &settings,
         flags::Noqa::Enabled,
-        flags::Autofix::Enabled,
+        None,
     );
+
+    let source_code = locator.to_source_code();
 
     let messages: Vec<ExpandedMessage> = diagnostics
         .into_iter()
-        .map(|message| ExpandedMessage {
-            code: message.kind.rule().noqa_code().to_string(),
-            message: message.kind.body,
-            location: message.location,
-            end_location: message.end_location,
-            fix: if message.fix.is_empty() {
-                None
-            } else {
-                Some(ExpandedFix {
+        .map(|message| {
+            let start_location = source_code.source_location(message.start());
+            let end_location = source_code.source_location(message.end());
+
+            ExpandedMessage {
+                code: message.kind.rule().noqa_code().to_string(),
+                message: message.kind.body,
+                location: start_location,
+                end_location,
+                fix: message.fix.map(|fix| ExpandedFix {
                     message: message.kind.suggestion,
-                    edits: message.fix.into_edits(),
-                })
-            },
+                    edits: fix
+                        .into_edits()
+                        .into_iter()
+                        .map(|edit| ExpandedEdit {
+                            location: source_code.source_location(edit.start()),
+                            end_location: source_code.source_location(edit.end()),
+                            content: edit.content().map(ToString::to_string),
+                        })
+                        .collect(),
+                }),
+            }
         })
         .collect();
 

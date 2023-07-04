@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -43,29 +42,26 @@ impl AlwaysAutofixableViolation for UnnecessaryGeneratorDict {
 }
 
 /// C402 (`dict((x, y) for x, y in iterable)`)
-pub fn unnecessary_generator_dict(
+pub(crate) fn unnecessary_generator_dict(
     checker: &mut Checker,
     expr: &Expr,
-    parent: Option<&Expr>,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords)
+    else {
         return;
     };
-    if let ExprKind::GeneratorExp { elt, .. } = argument {
-        match &elt.node {
-            ExprKind::Tuple { elts, .. } if elts.len() == 2 => {
-                let mut diagnostic = Diagnostic::new(UnnecessaryGeneratorDict, Range::from(expr));
+    if let Expr::GeneratorExp(ast::ExprGeneratorExp { elt, .. }) = argument {
+        match elt.as_ref() {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) if elts.len() == 2 => {
+                let mut diagnostic = Diagnostic::new(UnnecessaryGeneratorDict, expr.range());
                 if checker.patch(diagnostic.kind.rule()) {
-                    diagnostic.try_set_fix(|| {
-                        fixes::fix_unnecessary_generator_dict(
-                            checker.locator,
-                            checker.stylist,
-                            expr,
-                            parent,
-                        )
+                    #[allow(deprecated)]
+                    diagnostic.try_set_fix_from_edit(|| {
+                        fixes::fix_unnecessary_generator_dict(checker, expr)
                     });
                 }
                 checker.diagnostics.push(diagnostic);

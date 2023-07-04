@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -13,7 +12,7 @@ use super::helpers;
 /// ## What it does
 /// Checks for unnecessary list comprehensions.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// It's unnecessary to use a list comprehension inside a call to `dict`,
 /// since there is an equivalent comprehension for this type.
 ///
@@ -41,32 +40,35 @@ impl AlwaysAutofixableViolation for UnnecessaryListComprehensionDict {
 }
 
 /// C404 (`dict([...])`)
-pub fn unnecessary_list_comprehension_dict(
+pub(crate) fn unnecessary_list_comprehension_dict(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("dict", func, args, keywords)
+    else {
         return;
     };
-    if !checker.ctx.is_builtin("dict") {
+    if !checker.semantic().is_builtin("dict") {
         return;
     }
-    let ExprKind::ListComp { elt, .. } = &argument else {
+    let Expr::ListComp(ast::ExprListComp { elt, .. }) = argument else {
         return;
     };
-    let ExprKind::Tuple { elts, .. } = &elt.node else {
+    let Expr::Tuple(ast::ExprTuple { elts, .. }) = elt.as_ref() else {
         return;
     };
     if elts.len() != 2 {
         return;
     }
-    let mut diagnostic = Diagnostic::new(UnnecessaryListComprehensionDict, Range::from(expr));
+    let mut diagnostic = Diagnostic::new(UnnecessaryListComprehensionDict, expr.range());
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.try_set_fix(|| {
-            fixes::fix_unnecessary_list_comprehension_dict(checker.locator, checker.stylist, expr)
+        #[allow(deprecated)]
+        diagnostic.try_set_fix_from_edit(|| {
+            fixes::fix_unnecessary_list_comprehension_dict(checker, expr)
         });
     }
     checker.diagnostics.push(diagnostic);

@@ -1,9 +1,8 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::helpers::SimpleCallArgs;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -32,36 +31,42 @@ impl Violation for UnsafeYAMLLoad {
 }
 
 /// S506
-pub fn unsafe_yaml_load(checker: &mut Checker, func: &Expr, args: &[Expr], keywords: &[Keyword]) {
+pub(crate) fn unsafe_yaml_load(
+    checker: &mut Checker,
+    func: &Expr,
+    args: &[Expr],
+    keywords: &[Keyword],
+) {
     if checker
-        .ctx
+        .semantic()
         .resolve_call_path(func)
-        .map_or(false, |call_path| call_path.as_slice() == ["yaml", "load"])
+        .map_or(false, |call_path| {
+            matches!(call_path.as_slice(), ["yaml", "load"])
+        })
     {
         let call_args = SimpleCallArgs::new(args, keywords);
         if let Some(loader_arg) = call_args.argument("Loader", 1) {
             if !checker
-                .ctx
+                .semantic()
                 .resolve_call_path(loader_arg)
                 .map_or(false, |call_path| {
-                    call_path.as_slice() == ["yaml", "SafeLoader"]
-                        || call_path.as_slice() == ["yaml", "CSafeLoader"]
+                    matches!(call_path.as_slice(), ["yaml", "SafeLoader" | "CSafeLoader"])
                 })
             {
-                let loader = match &loader_arg.node {
-                    ExprKind::Attribute { attr, .. } => Some(attr.to_string()),
-                    ExprKind::Name { id, .. } => Some(id.to_string()),
+                let loader = match loader_arg {
+                    Expr::Attribute(ast::ExprAttribute { attr, .. }) => Some(attr.to_string()),
+                    Expr::Name(ast::ExprName { id, .. }) => Some(id.to_string()),
                     _ => None,
                 };
                 checker.diagnostics.push(Diagnostic::new(
                     UnsafeYAMLLoad { loader },
-                    Range::from(loader_arg),
+                    loader_arg.range(),
                 ));
             }
         } else {
             checker.diagnostics.push(Diagnostic::new(
                 UnsafeYAMLLoad { loader: None },
-                Range::from(func),
+                func.range(),
             ));
         }
     }

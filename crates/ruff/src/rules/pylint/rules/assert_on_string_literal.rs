@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 
@@ -43,9 +42,9 @@ impl Violation for AssertOnStringLiteral {
 }
 
 /// PLW0129
-pub fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
-    match &test.node {
-        ExprKind::Constant { value, .. } => match value {
+pub(crate) fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
+    match test {
+        Expr::Constant(ast::ExprConstant { value, .. }) => match value {
             Constant::Str(value, ..) => {
                 checker.diagnostics.push(Diagnostic::new(
                     AssertOnStringLiteral {
@@ -55,7 +54,7 @@ pub fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
                             Kind::NonEmpty
                         },
                     },
-                    Range::from(test),
+                    test.range(),
                 ));
             }
             Constant::Bytes(value) => {
@@ -67,16 +66,16 @@ pub fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
                             Kind::NonEmpty
                         },
                     },
-                    Range::from(test),
+                    test.range(),
                 ));
             }
             _ => {}
         },
-        ExprKind::JoinedStr { values } => {
+        Expr::JoinedStr(ast::ExprJoinedStr { values, range: _ }) => {
             checker.diagnostics.push(Diagnostic::new(
                 AssertOnStringLiteral {
-                    kind: if values.iter().all(|value| match &value.node {
-                        ExprKind::Constant { value, .. } => match value {
+                    kind: if values.iter().all(|value| match value {
+                        Expr::Constant(ast::ExprConstant { value, .. }) => match value {
                             Constant::Str(value, ..) => value.is_empty(),
                             Constant::Bytes(value) => value.is_empty(),
                             _ => false,
@@ -84,8 +83,8 @@ pub fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
                         _ => false,
                     }) {
                         Kind::Empty
-                    } else if values.iter().any(|value| match &value.node {
-                        ExprKind::Constant { value, .. } => match value {
+                    } else if values.iter().any(|value| match value {
+                        Expr::Constant(ast::ExprConstant { value, .. }) => match value {
                             Constant::Str(value, ..) => !value.is_empty(),
                             Constant::Bytes(value) => !value.is_empty(),
                             _ => false,
@@ -97,7 +96,7 @@ pub fn assert_on_string_literal(checker: &mut Checker, test: &Expr) {
                         Kind::Unknown
                     },
                 },
-                Range::from(test),
+                test.range(),
             ));
         }
         _ => {}

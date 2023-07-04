@@ -1,12 +1,42 @@
-use rustpython_parser::ast::Arg;
+use rustpython_parser::ast::{Arg, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_stdlib::str;
 
+use crate::settings::types::IdentifierPattern;
+
+/// ## What it does
+/// Checks for argument names that do not follow the `snake_case` convention.
+///
+/// ## Why is this bad?
+/// [PEP 8] recommends that function names should be lower case and separated
+/// by underscores (also known as `snake_case`).
+///
+/// > Function names should be lowercase, with words separated by underscores
+/// as necessary to improve readability.
+/// >
+/// > Variable names follow the same convention as function names.
+/// >
+/// > mixedCase is allowed only in contexts where that’s already the
+/// prevailing style (e.g. threading.py), to retain backwards compatibility.
+///
+/// ## Example
+/// ```python
+/// def MY_FUNCTION():
+///     pass
+/// ```
+///
+/// Use instead:
+/// ```python
+/// def my_function():
+///     pass
+/// ```
+///
+/// [PEP 8]: https://peps.python.org/pep-0008/#function-and-method-arguments
 #[violation]
 pub struct InvalidArgumentName {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for InvalidArgumentName {
@@ -18,16 +48,23 @@ impl Violation for InvalidArgumentName {
 }
 
 /// N803
-pub fn invalid_argument_name(name: &str, arg: &Arg, ignore_names: &[String]) -> Option<Diagnostic> {
-    if ignore_names.iter().any(|ignore_name| ignore_name == name) {
+pub(crate) fn invalid_argument_name(
+    name: &str,
+    arg: &Arg,
+    ignore_names: &[IdentifierPattern],
+) -> Option<Diagnostic> {
+    if ignore_names
+        .iter()
+        .any(|ignore_name| ignore_name.matches(name))
+    {
         return None;
     }
-    if name.to_lowercase() != name {
+    if !str::is_lowercase(name) {
         return Some(Diagnostic::new(
             InvalidArgumentName {
                 name: name.to_string(),
             },
-            Range::from(arg),
+            arg.range(),
         ));
     }
     None

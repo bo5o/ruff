@@ -1,14 +1,15 @@
 use std::str::FromStr;
 
+use ruff_text_size::TextRange;
 use rustc_hash::FxHashMap;
-use rustpython_common::cformat::{CFormatPart, CFormatSpec, CFormatStrOrBytes, CFormatString};
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Location, Operator};
+use rustpython_format::cformat::{CFormatPart, CFormatSpec, CFormatStrOrBytes, CFormatString};
+use rustpython_parser::ast::{self, Constant, Expr, Ranged};
 use rustpython_parser::{lexer, Mode, Tok};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::str::{leading_quote, trailing_quote};
-use ruff_python_ast::types::Range;
+use ruff_python_semantic::analyze::type_inference::PythonType;
 
 use crate::checkers::ast::Checker;
 
@@ -39,87 +40,6 @@ impl Violation for BadStringFormatType {
 }
 
 #[derive(Debug, Copy, Clone)]
-enum DataType {
-    String,
-    Integer,
-    Float,
-    Object,
-    Unknown,
-}
-
-impl From<&Expr> for DataType {
-    fn from(expr: &Expr) -> Self {
-        match &expr.node {
-            ExprKind::NamedExpr { value, .. } => (&**value).into(),
-            ExprKind::UnaryOp { operand, .. } => (&**operand).into(),
-            ExprKind::Dict { .. } => DataType::Object,
-            ExprKind::Set { .. } => DataType::Object,
-            ExprKind::ListComp { .. } => DataType::Object,
-            ExprKind::SetComp { .. } => DataType::Object,
-            ExprKind::DictComp { .. } => DataType::Object,
-            ExprKind::GeneratorExp { .. } => DataType::Object,
-            ExprKind::JoinedStr { .. } => DataType::String,
-            ExprKind::BinOp { left, op, .. } => {
-                // Ex) "a" % "b"
-                if matches!(
-                    left.node,
-                    ExprKind::Constant {
-                        value: Constant::Str(..),
-                        ..
-                    }
-                ) && matches!(op, Operator::Mod)
-                {
-                    return DataType::String;
-                }
-                DataType::Unknown
-            }
-            ExprKind::Constant { value, .. } => match value {
-                Constant::Str(_) => DataType::String,
-                Constant::Int(_) => DataType::Integer,
-                Constant::Float(_) => DataType::Float,
-                _ => DataType::Unknown,
-            },
-            ExprKind::List { .. } => DataType::Object,
-            ExprKind::Tuple { .. } => DataType::Object,
-            _ => DataType::Unknown,
-        }
-    }
-}
-
-impl DataType {
-    fn is_compatible_with(self, format: FormatType) -> bool {
-        match self {
-            DataType::String => matches!(
-                format,
-                FormatType::Unknown | FormatType::String | FormatType::Repr
-            ),
-            DataType::Object => matches!(
-                format,
-                FormatType::Unknown | FormatType::String | FormatType::Repr
-            ),
-            DataType::Integer => matches!(
-                format,
-                FormatType::Unknown
-                    | FormatType::String
-                    | FormatType::Repr
-                    | FormatType::Integer
-                    | FormatType::Float
-                    | FormatType::Number
-            ),
-            DataType::Float => matches!(
-                format,
-                FormatType::Unknown
-                    | FormatType::String
-                    | FormatType::Repr
-                    | FormatType::Float
-                    | FormatType::Number
-            ),
-            DataType::Unknown => true,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
 enum FormatType {
     Repr,
     String,
@@ -127,6 +47,45 @@ enum FormatType {
     Float,
     Number,
     Unknown,
+}
+
+impl FormatType {
+    fn is_compatible_with(self, data_type: PythonType) -> bool {
+        match data_type {
+            PythonType::String
+            | PythonType::Bytes
+            | PythonType::List
+            | PythonType::Dict
+            | PythonType::Set
+            | PythonType::Tuple
+            | PythonType::Generator
+            | PythonType::Complex
+            | PythonType::Bool
+            | PythonType::Ellipsis
+            | PythonType::None => matches!(
+                self,
+                FormatType::Unknown | FormatType::String | FormatType::Repr
+            ),
+            PythonType::Integer => matches!(
+                self,
+                FormatType::Unknown
+                    | FormatType::String
+                    | FormatType::Repr
+                    | FormatType::Integer
+                    | FormatType::Float
+                    | FormatType::Number
+            ),
+            PythonType::Float => matches!(
+                self,
+                FormatType::Unknown
+                    | FormatType::String
+                    | FormatType::Repr
+                    | FormatType::Float
+                    | FormatType::Number
+            ),
+            PythonType::Unknown => true,
+        }
+    }
 }
 
 impl From<char> for FormatType {
@@ -159,9 +118,9 @@ fn collect_specs(formats: &[CFormatStrOrBytes<String>]) -> Vec<&CFormatSpec> {
 
 /// Return `true` if the format string is equivalent to the constant type
 fn equivalent(format: &CFormatSpec, value: &Expr) -> bool {
-    let constant: DataType = value.into();
     let format: FormatType = format.format_char.into();
-    constant.is_compatible_with(format)
+    let constant: PythonType = value.into();
+    format.is_compatible_with(constant)
 }
 
 /// Return `true` if the [`Constnat`] aligns with the format type.
@@ -221,10 +180,10 @@ fn is_valid_dict(
         let Some(key) = key else {
             return true;
         };
-        if let ExprKind::Constant {
+        if let Expr::Constant(ast::ExprConstant {
             value: Constant::Str(mapping_key),
             ..
-        } = &key.node
+        }) = key
         {
             let Some(format) = formats_hash.get(mapping_key.as_str()) else {
                 return true;
@@ -241,13 +200,13 @@ fn is_valid_dict(
 }
 
 /// PLE1307
-pub fn bad_string_format_type(checker: &mut Checker, expr: &Expr, right: &Expr) {
+pub(crate) fn bad_string_format_type(checker: &mut Checker, expr: &Expr, right: &Expr) {
     // Grab each string segment (in case there's an implicit concatenation).
-    let content = checker.locator.slice(expr);
-    let mut strings: Vec<(Location, Location)> = vec![];
-    for (start, tok, end) in lexer::lex_located(content, Mode::Module, expr.location).flatten() {
+    let content = checker.locator.slice(expr.range());
+    let mut strings: Vec<TextRange> = vec![];
+    for (tok, range) in lexer::lex_starts_at(content, Mode::Module, expr.start()).flatten() {
         if matches!(tok, Tok::String { .. }) {
-            strings.push((start, end));
+            strings.push(range);
         } else if matches!(tok, Tok::Percent) {
             // Break as soon as we find the modulo symbol.
             break;
@@ -261,8 +220,8 @@ pub fn bad_string_format_type(checker: &mut Checker, expr: &Expr, right: &Expr) 
 
     // Parse each string segment.
     let mut format_strings = vec![];
-    for (start, end) in &strings {
-        let string = checker.locator.slice(Range::new(*start, *end));
+    for range in &strings {
+        let string = checker.locator.slice(*range);
         let (Some(leader), Some(trailer)) = (leading_quote(string), trailing_quote(string)) else {
             return;
         };
@@ -275,15 +234,19 @@ pub fn bad_string_format_type(checker: &mut Checker, expr: &Expr, right: &Expr) 
     }
 
     // Parse the parameters.
-    let is_valid = match &right.node {
-        ExprKind::Tuple { elts, .. } => is_valid_tuple(&format_strings, elts),
-        ExprKind::Dict { keys, values } => is_valid_dict(&format_strings, keys, values),
-        ExprKind::Constant { .. } => is_valid_constant(&format_strings, right),
+    let is_valid = match right {
+        Expr::Tuple(ast::ExprTuple { elts, .. }) => is_valid_tuple(&format_strings, elts),
+        Expr::Dict(ast::ExprDict {
+            keys,
+            values,
+            range: _,
+        }) => is_valid_dict(&format_strings, keys, values),
+        Expr::Constant(_) => is_valid_constant(&format_strings, right),
         _ => true,
     };
     if !is_valid {
         checker
             .diagnostics
-            .push(Diagnostic::new(BadStringFormatType, Range::from(expr)));
+            .push(Diagnostic::new(BadStringFormatType, expr.range()));
     }
 }

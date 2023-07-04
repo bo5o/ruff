@@ -1,5 +1,6 @@
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
+use ruff_python_whitespace::Line;
 
 use crate::rules::pycodestyle::helpers::is_overlong;
 use crate::settings::Settings;
@@ -8,7 +9,18 @@ use crate::settings::Settings;
 /// Checks for lines that exceed the specified maximum character length.
 ///
 /// ## Why is this bad?
-/// Overlong lines can hurt readability.
+/// Overlong lines can hurt readability. [PEP 8], for example, recommends
+/// limiting lines to 79 characters.
+///
+/// In the interest of pragmatism, this rule makes a few exceptions when
+/// determining whether a line is overlong. Namely, it ignores lines that
+/// consist of a single "word" (i.e., without any whitespace between its
+/// characters), and lines that end with a URL (as long as the URL starts
+/// before the line-length threshold).
+///
+/// If `pycodestyle.ignore_overlong_task_comments` is `true`, this rule will
+/// also ignore comments that start with any of the specified `task-tags`
+/// (e.g., `# TODO:`).
 ///
 /// ## Example
 /// ```python
@@ -22,6 +34,12 @@ use crate::settings::Settings;
 ///     param6, param7, param8, param9, param10
 /// )
 /// ```
+///
+/// ## Options
+/// - `task-tags`
+/// - `pycodestyle.ignore-overlong-task-comments`
+///
+/// [PEP 8]: https://peps.python.org/pep-0008/#maximum-line-length
 #[violation]
 pub struct LineTooLong(pub usize, pub usize);
 
@@ -34,7 +52,7 @@ impl Violation for LineTooLong {
 }
 
 /// E501
-pub fn line_too_long(lineno: usize, line: &str, settings: &Settings) -> Option<Diagnostic> {
+pub(crate) fn line_too_long(line: &Line, settings: &Settings) -> Option<Diagnostic> {
     let limit = settings.line_length;
 
     is_overlong(
@@ -42,6 +60,7 @@ pub fn line_too_long(lineno: usize, line: &str, settings: &Settings) -> Option<D
         limit,
         settings.pycodestyle.ignore_overlong_task_comments,
         &settings.task_tags,
+        settings.tab_size,
     )
-    .map(|overlong| Diagnostic::new(LineTooLong(overlong.width(), limit), overlong.range(lineno)))
+    .map(|overlong| Diagnostic::new(LineTooLong(overlong.width(), limit.get()), overlong.range()))
 }

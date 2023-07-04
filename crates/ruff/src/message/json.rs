@@ -1,10 +1,14 @@
-use crate::message::{Emitter, EmitterContext, Message};
-use crate::registry::AsRule;
-use ruff_diagnostics::Edit;
+use std::io::Write;
+
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
-use serde_json::json;
-use std::io::Write;
+use serde_json::{json, Value};
+
+use ruff_diagnostics::Edit;
+use ruff_python_ast::source_code::SourceCode;
+
+use crate::message::{Emitter, EmitterContext, Message};
+use crate::registry::AsRule;
 
 #[derive(Default)]
 pub struct JsonEmitter;
@@ -34,25 +38,7 @@ impl Serialize for ExpandedMessages<'_> {
         let mut s = serializer.serialize_seq(Some(self.messages.len()))?;
 
         for message in self.messages {
-            let fix = if message.fix.is_empty() {
-                None
-            } else {
-                Some(json!({
-                    "message": message.kind.suggestion.as_deref(),
-                    "edits": &ExpandedEdits { edits: message.fix.edits() },
-                }))
-            };
-
-            let value = json!({
-                "code": message.kind.rule().noqa_code().to_string(),
-                "message": message.kind.body,
-                "fix": fix,
-                "location": message.location,
-                "end_location": message.end_location,
-                "filename": message.filename(),
-                "noqa_row": message.noqa_row
-            });
-
+            let value = message_to_json_value(message);
             s.serialize_element(&value)?;
         }
 
@@ -60,8 +46,36 @@ impl Serialize for ExpandedMessages<'_> {
     }
 }
 
+pub(crate) fn message_to_json_value(message: &Message) -> Value {
+    let source_code = message.file.to_source_code();
+
+    let fix = message.fix.as_ref().map(|fix| {
+        json!({
+            "applicability": fix.applicability(),
+            "message": message.kind.suggestion.as_deref(),
+            "edits": &ExpandedEdits { edits: fix.edits(), source_code: &source_code },
+        })
+    });
+
+    let start_location = source_code.source_location(message.start());
+    let end_location = source_code.source_location(message.end());
+    let noqa_location = source_code.source_location(message.noqa_offset);
+
+    json!({
+        "code": message.kind.rule().noqa_code().to_string(),
+        "url": message.kind.rule().url(),
+        "message": message.kind.body,
+        "fix": fix,
+        "location": start_location,
+        "end_location": end_location,
+        "filename": message.filename(),
+        "noqa_row": noqa_location.row
+    })
+}
+
 struct ExpandedEdits<'a> {
     edits: &'a [Edit],
+    source_code: &'a SourceCode<'a, 'a>,
 }
 
 impl Serialize for ExpandedEdits<'_> {
@@ -74,8 +88,8 @@ impl Serialize for ExpandedEdits<'_> {
         for edit in self.edits {
             let value = json!({
                 "content": edit.content().unwrap_or_default(),
-                "location": edit.location(),
-                "end_location": edit.end_location()
+                "location": self.source_code.source_location(edit.start()),
+                "end_location": self.source_code.source_location(edit.end())
             });
 
             s.serialize_element(&value)?;
@@ -87,9 +101,10 @@ impl Serialize for ExpandedEdits<'_> {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_snapshot;
+
     use crate::message::tests::{capture_emitter_output, create_messages};
     use crate::message::JsonEmitter;
-    use insta::assert_snapshot;
 
     #[test]
     fn output() {

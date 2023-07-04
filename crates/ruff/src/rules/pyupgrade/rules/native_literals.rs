@@ -1,17 +1,16 @@
 use std::fmt;
 
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{self, Constant, Expr, Keyword, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::str::is_implicit_concatenation;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum LiteralType {
+pub(crate) enum LiteralType {
     Str,
     Bytes,
 }
@@ -25,9 +24,29 @@ impl fmt::Display for LiteralType {
     }
 }
 
+/// ## What it does
+/// Checks for unnecessary calls to `str` and `bytes`.
+///
+/// ## Why is this bad?
+/// The `str` and `bytes` constructors can be replaced with string and bytes
+/// literals, which are more readable and idiomatic.
+///
+/// ## Example
+/// ```python
+/// str("foo")
+/// ```
+///
+/// Use instead:
+/// ```python
+/// "foo"
+/// ```
+///
+/// ## References
+/// - [Python documentation: `str`](https://docs.python.org/3/library/stdtypes.html#str)
+/// - [Python documentation: `bytes`](https://docs.python.org/3/library/stdtypes.html#bytes)
 #[violation]
 pub struct NativeLiterals {
-    pub literal_type: LiteralType,
+    literal_type: LiteralType,
 }
 
 impl AlwaysAutofixableViolation for NativeLiterals {
@@ -39,48 +58,57 @@ impl AlwaysAutofixableViolation for NativeLiterals {
 
     fn autofix_title(&self) -> String {
         let NativeLiterals { literal_type } = self;
-        format!("Replace with `{literal_type}`")
+        match literal_type {
+            LiteralType::Str => "Replace with empty string".to_string(),
+            LiteralType::Bytes => "Replace with empty bytes".to_string(),
+        }
     }
 }
 
 /// UP018
-pub fn native_literals(
+pub(crate) fn native_literals(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let ExprKind::Name { id, .. } = &func.node else { return; };
+    let Expr::Name(ast::ExprName { id, .. }) = func else {
+        return;
+    };
 
     if !keywords.is_empty() || args.len() > 1 {
         return;
     }
 
-    if (id == "str" || id == "bytes") && checker.ctx.is_builtin(id) {
+    // There's no way to rewrite, e.g., `f"{f'{str()}'}"` within a nested f-string.
+    if checker.semantic().in_nested_f_string() {
+        return;
+    }
+
+    if (id == "str" || id == "bytes") && checker.semantic().is_builtin(id) {
         let Some(arg) = args.get(0) else {
-            let mut diagnostic = Diagnostic::new(NativeLiterals{literal_type:if id == "str" {
-                LiteralType::Str
-            } else {
-                LiteralType::Bytes
-            }}, Range::from(expr));
-            if checker.patch(diagnostic.kind.rule()) {
-                diagnostic.set_fix(Edit::replacement(
-                    if id == "bytes" {
-                        let mut content = String::with_capacity(3);
-                        content.push('b');
-                        content.push(checker.stylist.quote().into());
-                        content.push(checker.stylist.quote().into());
-                        content
+            let mut diagnostic = Diagnostic::new(
+                NativeLiterals {
+                    literal_type: if id == "str" {
+                        LiteralType::Str
                     } else {
-                        let mut content = String::with_capacity(2);
-                        content.push(checker.stylist.quote().into());
-                        content.push(checker.stylist.quote().into());
-                        content
+                        LiteralType::Bytes
                     },
-                    expr.location,
-                    expr.end_location.unwrap(),
-                ));
+                },
+                expr.range(),
+            );
+            if checker.patch(diagnostic.kind.rule()) {
+                let constant = if id == "bytes" {
+                    Constant::Bytes(vec![])
+                } else {
+                    Constant::Str(String::new())
+                };
+                let content = checker.generator().constant(&constant);
+                diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
+                    content,
+                    expr.range(),
+                )));
             }
             checker.diagnostics.push(diagnostic);
             return;
@@ -89,11 +117,11 @@ pub fn native_literals(
         // Look for `str("")`.
         if id == "str"
             && !matches!(
-                &arg.node,
-                ExprKind::Constant {
+                &arg,
+                Expr::Constant(ast::ExprConstant {
                     value: Constant::Str(_),
                     ..
-                },
+                }),
             )
         {
             return;
@@ -102,18 +130,18 @@ pub fn native_literals(
         // Look for `bytes(b"")`
         if id == "bytes"
             && !matches!(
-                &arg.node,
-                ExprKind::Constant {
+                &arg,
+                Expr::Constant(ast::ExprConstant {
                     value: Constant::Bytes(_),
                     ..
-                },
+                }),
             )
         {
             return;
         }
 
         // Skip implicit string concatenations.
-        let arg_code = checker.locator.slice(arg);
+        let arg_code = checker.locator.slice(arg.range());
         if is_implicit_concatenation(arg_code) {
             return;
         }
@@ -126,14 +154,13 @@ pub fn native_literals(
                     LiteralType::Bytes
                 },
             },
-            Range::from(expr),
+            expr.range(),
         );
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.set_fix(Edit::replacement(
+            diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
                 arg_code.to_string(),
-                expr.location,
-                expr.end_location.unwrap(),
-            ));
+                expr.range(),
+            )));
         }
         checker.diagnostics.push(diagnostic);
     }

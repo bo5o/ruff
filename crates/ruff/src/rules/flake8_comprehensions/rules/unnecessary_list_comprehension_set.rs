@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind, Keyword};
+use rustpython_parser::ast::{Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -13,7 +12,7 @@ use super::helpers;
 /// ## What it does
 /// Checks for unnecessary list comprehensions.
 ///
-/// ## Why is it bad?
+/// ## Why is this bad?
 /// It's unnecessary to use a list comprehension inside a call to `set`,
 /// since there is an equivalent comprehension for this type.
 ///
@@ -41,28 +40,27 @@ impl AlwaysAutofixableViolation for UnnecessaryListComprehensionSet {
 }
 
 /// C403 (`set([...])`)
-pub fn unnecessary_list_comprehension_set(
+pub(crate) fn unnecessary_list_comprehension_set(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
     args: &[Expr],
     keywords: &[Keyword],
 ) {
-    let Some(argument) = helpers::exactly_one_argument_with_matching_function("set", func, args, keywords) else {
+    let Some(argument) =
+        helpers::exactly_one_argument_with_matching_function("set", func, args, keywords)
+    else {
         return;
     };
-    if !checker.ctx.is_builtin("set") {
+    if !checker.semantic().is_builtin("set") {
         return;
     }
-    if let ExprKind::ListComp { .. } = &argument {
-        let mut diagnostic = Diagnostic::new(UnnecessaryListComprehensionSet, Range::from(expr));
+    if argument.is_list_comp_expr() {
+        let mut diagnostic = Diagnostic::new(UnnecessaryListComprehensionSet, expr.range());
         if checker.patch(diagnostic.kind.rule()) {
-            diagnostic.try_set_fix(|| {
-                fixes::fix_unnecessary_list_comprehension_set(
-                    checker.locator,
-                    checker.stylist,
-                    expr,
-                )
+            #[allow(deprecated)]
+            diagnostic.try_set_fix_from_edit(|| {
+                fixes::fix_unnecessary_list_comprehension_set(checker, expr)
             });
         }
         checker.diagnostics.push(diagnostic);

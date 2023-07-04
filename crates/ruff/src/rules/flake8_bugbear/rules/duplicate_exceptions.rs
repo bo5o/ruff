@@ -1,23 +1,47 @@
 use itertools::Itertools;
+use ruff_text_size::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustpython_parser::ast::{
-    Excepthandler, ExcepthandlerKind, Expr, ExprContext, ExprKind, Location,
-};
+use rustpython_parser::ast::{self, ExceptHandler, Expr, ExprContext, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Violation};
-use ruff_diagnostics::{Diagnostic, Edit};
+use ruff_diagnostics::{Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::call_path;
 use ruff_python_ast::call_path::CallPath;
-use ruff_python_ast::helpers::unparse_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::{AsRule, Rule};
 
+/// ## What it does
+/// Checks for `try-except` blocks with duplicate exception handlers.
+///
+/// ## Why is this bad?
+/// Duplicate exception handlers are redundant, as the first handler will catch
+/// the exception, making the second handler unreachable.
+///
+/// ## Example
+/// ```python
+/// try:
+///     ...
+/// except ValueError:
+///     ...
+/// except ValueError:
+///     ...
+/// ```
+///
+/// Use instead:
+/// ```python
+/// try:
+///     ...
+/// except ValueError:
+///     ...
+/// ```
+///
+/// ## References
+/// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
 #[violation]
 pub struct DuplicateTryBlockException {
-    pub name: String,
+    name: String,
 }
 
 impl Violation for DuplicateTryBlockException {
@@ -27,6 +51,36 @@ impl Violation for DuplicateTryBlockException {
         format!("try-except block with duplicate exception `{name}`")
     }
 }
+
+/// ## What it does
+/// Checks for exception handlers that catch duplicate exceptions.
+///
+/// ## Why is this bad?
+/// Including the same exception multiple times in the same handler is redundant,
+/// as the first exception will catch the exception, making the second exception
+/// unreachable. The same applies to exception hierarchies, as a handler for a
+/// parent exception (like `Exception`) will also catch child exceptions (like
+/// `ValueError`).
+///
+/// ## Example
+/// ```python
+/// try:
+///     ...
+/// except (Exception, ValueError):  # `Exception` includes `ValueError`.
+///     ...
+/// ```
+///
+/// Use instead:
+/// ```python
+/// try:
+///     ...
+/// except Exception:
+///     ...
+/// ```
+///
+/// ## References
+/// - [Python documentation: `except` clause](https://docs.python.org/3/reference/compound_stmts.html#except-clause)
+/// - [Python documentation: Exception hierarchy](https://docs.python.org/3/library/exceptions.html#exception-hierarchy)
 #[violation]
 pub struct DuplicateHandlerException {
     pub names: Vec<String>,
@@ -51,14 +105,12 @@ impl AlwaysAutofixableViolation for DuplicateHandlerException {
 }
 
 fn type_pattern(elts: Vec<&Expr>) -> Expr {
-    Expr::new(
-        Location::default(),
-        Location::default(),
-        ExprKind::Tuple {
-            elts: elts.into_iter().cloned().collect(),
-            ctx: ExprContext::Load,
-        },
-    )
+    ast::ExprTuple {
+        elts: elts.into_iter().cloned().collect(),
+        ctx: ExprContext::Load,
+        range: TextRange::default(),
+    }
+    .into()
 }
 
 fn duplicate_handler_exceptions<'a>(
@@ -80,11 +132,7 @@ fn duplicate_handler_exceptions<'a>(
         }
     }
 
-    if checker
-        .settings
-        .rules
-        .enabled(Rule::DuplicateHandlerException)
-    {
+    if checker.enabled(Rule::DuplicateHandlerException) {
         // TODO(charlie): Handle "BaseException" and redundant exception aliases.
         if !duplicates.is_empty() {
             let mut diagnostic = Diagnostic::new(
@@ -95,18 +143,17 @@ fn duplicate_handler_exceptions<'a>(
                         .sorted()
                         .collect::<Vec<String>>(),
                 },
-                Range::from(expr),
+                expr.range(),
             );
             if checker.patch(diagnostic.kind.rule()) {
-                diagnostic.set_fix(Edit::replacement(
+                diagnostic.set_fix(Fix::automatic(Edit::range_replacement(
                     if unique_elts.len() == 1 {
-                        unparse_expr(unique_elts[0], checker.stylist)
+                        checker.generator().expr(unique_elts[0])
                     } else {
-                        unparse_expr(&type_pattern(unique_elts), checker.stylist)
+                        checker.generator().expr(&type_pattern(unique_elts))
                     },
-                    expr.location,
-                    expr.end_location.unwrap(),
-                ));
+                    expr.range(),
+                )));
             }
             checker.diagnostics.push(diagnostic);
         }
@@ -115,15 +162,19 @@ fn duplicate_handler_exceptions<'a>(
     seen
 }
 
-pub fn duplicate_exceptions(checker: &mut Checker, handlers: &[Excepthandler]) {
+pub(crate) fn duplicate_exceptions(checker: &mut Checker, handlers: &[ExceptHandler]) {
     let mut seen: FxHashSet<CallPath> = FxHashSet::default();
     let mut duplicates: FxHashMap<CallPath, Vec<&Expr>> = FxHashMap::default();
     for handler in handlers {
-        let ExcepthandlerKind::ExceptHandler { type_: Some(type_), .. } = &handler.node else {
+        let ExceptHandler::ExceptHandler(ast::ExceptHandlerExceptHandler {
+            type_: Some(type_),
+            ..
+        }) = handler
+        else {
             continue;
         };
-        match &type_.node {
-            ExprKind::Attribute { .. } | ExprKind::Name { .. } => {
+        match type_.as_ref() {
+            Expr::Attribute(_) | Expr::Name(_) => {
                 if let Some(call_path) = call_path::collect_call_path(type_) {
                     if seen.contains(&call_path) {
                         duplicates.entry(call_path).or_default().push(type_);
@@ -132,7 +183,7 @@ pub fn duplicate_exceptions(checker: &mut Checker, handlers: &[Excepthandler]) {
                     }
                 }
             }
-            ExprKind::Tuple { elts, .. } => {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                 for (name, expr) in duplicate_handler_exceptions(checker, type_, elts) {
                     if seen.contains(&name) {
                         duplicates.entry(name).or_default().push(expr);
@@ -145,18 +196,14 @@ pub fn duplicate_exceptions(checker: &mut Checker, handlers: &[Excepthandler]) {
         }
     }
 
-    if checker
-        .settings
-        .rules
-        .enabled(Rule::DuplicateTryBlockException)
-    {
+    if checker.enabled(Rule::DuplicateTryBlockException) {
         for (name, exprs) in duplicates {
             for expr in exprs {
                 checker.diagnostics.push(Diagnostic::new(
                     DuplicateTryBlockException {
                         name: name.join("."),
                     },
-                    Range::from(expr),
+                    expr.range(),
                 ));
             }
         }

@@ -1,17 +1,16 @@
 use std::fmt;
 
-use rustpython_parser::ast::{Expr, ExprKind, Location, Operator};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, Expr, Operator, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::unparse_expr;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum CallKind {
+pub(crate) enum CallKind {
     Isinstance,
     Issubclass,
 }
@@ -26,7 +25,7 @@ impl fmt::Display for CallKind {
 }
 
 impl CallKind {
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "isinstance" => Some(CallKind::Isinstance),
             "issubclass" => Some(CallKind::Issubclass),
@@ -35,9 +34,36 @@ impl CallKind {
     }
 }
 
+/// ## What it does
+/// Checks for uses of `isinstance` and `issubclass` that take a tuple
+/// of types for comparison.
+///
+/// ## Why is this bad?
+/// Since Python 3.10, `isinstance` and `issubclass` can be passed a
+/// `|`-separated union of types, which is more concise and consistent
+/// with the union operator introduced in [PEP 604].
+///
+/// ## Example
+/// ```python
+/// isinstance(x, (int, float))
+/// ```
+///
+/// Use instead:
+/// ```python
+/// isinstance(x, int | float)
+/// ```
+///
+/// ## Options
+/// - `target-version`
+///
+/// ## References
+/// - [Python documentation: `isinstance`](https://docs.python.org/3/library/functions.html#isinstance)
+/// - [Python documentation: `issubclass`](https://docs.python.org/3/library/functions.html#issubclass)
+///
+/// [PEP 604]: https://peps.python.org/pep-0604/
 #[violation]
 pub struct NonPEP604Isinstance {
-    pub kind: CallKind,
+    kind: CallKind,
 }
 
 impl AlwaysAutofixableViolation for NonPEP604Isinstance {
@@ -55,50 +81,47 @@ fn union(elts: &[Expr]) -> Expr {
     if elts.len() == 1 {
         elts[0].clone()
     } else {
-        Expr::new(
-            Location::default(),
-            Location::default(),
-            ExprKind::BinOp {
-                left: Box::new(union(&elts[..elts.len() - 1])),
-                op: Operator::BitOr,
-                right: Box::new(elts[elts.len() - 1].clone()),
-            },
-        )
+        Expr::BinOp(ast::ExprBinOp {
+            left: Box::new(union(&elts[..elts.len() - 1])),
+            op: Operator::BitOr,
+            right: Box::new(elts[elts.len() - 1].clone()),
+            range: TextRange::default(),
+        })
     }
 }
 
 /// UP038
-pub fn use_pep604_isinstance(checker: &mut Checker, expr: &Expr, func: &Expr, args: &[Expr]) {
-    if let ExprKind::Name { id, .. } = &func.node {
+pub(crate) fn use_pep604_isinstance(
+    checker: &mut Checker,
+    expr: &Expr,
+    func: &Expr,
+    args: &[Expr],
+) {
+    if let Expr::Name(ast::ExprName { id, .. }) = func {
         let Some(kind) = CallKind::from_name(id) else {
             return;
         };
-        if !checker.ctx.is_builtin(id) {
+        if !checker.semantic().is_builtin(id) {
             return;
         };
         if let Some(types) = args.get(1) {
-            if let ExprKind::Tuple { elts, .. } = &types.node {
+            if let Expr::Tuple(ast::ExprTuple { elts, .. }) = &types {
                 // Ex) `()`
                 if elts.is_empty() {
                     return;
                 }
 
                 // Ex) `(*args,)`
-                if elts
-                    .iter()
-                    .any(|elt| matches!(elt.node, ExprKind::Starred { .. }))
-                {
+                if elts.iter().any(Expr::is_starred_expr) {
                     return;
                 }
 
-                let mut diagnostic =
-                    Diagnostic::new(NonPEP604Isinstance { kind }, Range::from(expr));
+                let mut diagnostic = Diagnostic::new(NonPEP604Isinstance { kind }, expr.range());
                 if checker.patch(diagnostic.kind.rule()) {
-                    diagnostic.set_fix(Edit::replacement(
-                        unparse_expr(&union(elts), checker.stylist),
-                        types.location,
-                        types.end_location.unwrap(),
-                    ));
+                    diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                        checker.generator().expr(&union(elts)),
+                        types.range(),
+                    )));
                 }
                 checker.diagnostics.push(diagnostic);
             }

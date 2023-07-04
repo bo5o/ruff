@@ -1,7 +1,7 @@
 //! Implements helper functions for using vendored/format.rs
 use std::convert::TryFrom;
 
-use rustpython_common::format::{
+use rustpython_format::{
     FieldName, FieldType, FormatParseError, FormatPart, FormatString, FromTemplate,
 };
 
@@ -22,11 +22,10 @@ pub(crate) fn error_to_string(err: &FormatParseError) -> String {
 
 #[derive(Debug)]
 pub(crate) struct FormatSummary {
-    pub autos: Vec<usize>,
-    pub indices: Vec<usize>,
-    pub keywords: Vec<String>,
-    pub has_nested_parts: bool,
-    pub format_string: FormatString,
+    pub(crate) autos: Vec<usize>,
+    pub(crate) indices: Vec<usize>,
+    pub(crate) keywords: Vec<String>,
+    pub(crate) has_nested_parts: bool,
 }
 
 impl TryFrom<&str> for FormatSummary {
@@ -45,7 +44,8 @@ impl TryFrom<&str> for FormatSummary {
                 field_name,
                 format_spec,
                 ..
-            } = format_part else {
+            } = format_part
+            else {
                 continue;
             };
             let parsed = FieldName::parse(field_name)?;
@@ -75,7 +75,6 @@ impl TryFrom<&str> for FormatSummary {
             indices,
             keywords,
             has_nested_parts,
-            format_string,
         })
     }
 }

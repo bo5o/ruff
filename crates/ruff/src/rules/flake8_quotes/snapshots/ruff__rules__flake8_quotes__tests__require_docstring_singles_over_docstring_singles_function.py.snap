@@ -3,15 +3,15 @@ source: crates/ruff/src/rules/flake8_quotes/mod.rs
 ---
 docstring_singles_function.py:3:5: Q001 [*] Single quote multiline found but double quotes preferred
   |
-3 | def foo():
-4 |     '''function without params, single line docstring'''
-5 |     ''' not a docstring'''
+1 | def foo():
+2 |     '''function without params, single line docstring'''
+3 |     ''' not a docstring'''
   |     ^^^^^^^^^^^^^^^^^^^^^^ Q001
-6 |     return
+4 |     return
   |
   = help: Replace single multiline quotes with double quotes
 
-ℹ Suggested fix
+ℹ Fix
 1 1 | def foo():
 2 2 |     '''function without params, single line docstring'''
 3   |-    ''' not a docstring'''
@@ -22,15 +22,15 @@ docstring_singles_function.py:3:5: Q001 [*] Single quote multiline found but dou
 
 docstring_singles_function.py:11:5: Q001 [*] Single quote multiline found but double quotes preferred
    |
-11 |         function without params, multiline docstring
-12 |     '''
-13 |     ''' not a docstring'''
+ 9 |         function without params, multiline docstring
+10 |     '''
+11 |     ''' not a docstring'''
    |     ^^^^^^^^^^^^^^^^^^^^^^ Q001
-14 |     return
+12 |     return
    |
    = help: Replace single multiline quotes with double quotes
 
-ℹ Suggested fix
+ℹ Fix
 8  8  |     '''
 9  9  |         function without params, multiline docstring
 10 10 |     '''
@@ -51,7 +51,7 @@ docstring_singles_function.py:15:39: Q001 [*] Single quote multiline found but d
    |
    = help: Replace single multiline quotes with double quotes
 
-ℹ Suggested fix
+ℹ Fix
 12 12 |     return
 13 13 | 
 14 14 | 
@@ -66,15 +66,15 @@ docstring_singles_function.py:15:39: Q001 [*] Single quote multiline found but d
 
 docstring_singles_function.py:17:5: Q001 [*] Single quote multiline found but double quotes preferred
    |
-17 | def fun_with_params_no_docstring(a, b='''
-18 |     not a
-19 | ''' '''docstring'''):
+15 | def fun_with_params_no_docstring(a, b='''
+16 |     not a
+17 | ''' '''docstring'''):
    |     ^^^^^^^^^^^^^^^ Q001
-20 |     pass
+18 |     pass
    |
    = help: Replace single multiline quotes with double quotes
 
-ℹ Suggested fix
+ℹ Fix
 14 14 | 
 15 15 | def fun_with_params_no_docstring(a, b='''
 16 16 |     not a
@@ -86,14 +86,14 @@ docstring_singles_function.py:17:5: Q001 [*] Single quote multiline found but do
 
 docstring_singles_function.py:22:5: Q001 [*] Single quote multiline found but double quotes preferred
    |
-22 | def fun_with_params_no_docstring2(a, b=c[foo():], c=\
-23 |     ''' not a docstring '''):
+21 | def fun_with_params_no_docstring2(a, b=c[foo():], c=\
+22 |     ''' not a docstring '''):
    |     ^^^^^^^^^^^^^^^^^^^^^^^ Q001
-24 |     pass
+23 |     pass
    |
    = help: Replace single multiline quotes with double quotes
 
-ℹ Suggested fix
+ℹ Fix
 19 19 | 
 20 20 | 
 21 21 | def fun_with_params_no_docstring2(a, b=c[foo():], c=\

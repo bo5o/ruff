@@ -1,9 +1,10 @@
-use rustpython_parser::ast::{Alias, Stmt};
+use rustpython_parser::ast::{Alias, Ranged, Stmt};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 use ruff_python_stdlib::str;
+
+use crate::settings::types::IdentifierPattern;
 
 /// ## What it does
 /// Checks for lowercase imports that are aliased to non-lowercase names.
@@ -30,8 +31,8 @@ use ruff_python_stdlib::str;
 /// [PEP 8]: https://peps.python.org/pep-0008/
 #[violation]
 pub struct LowercaseImportedAsNonLowercase {
-    pub name: String,
-    pub asname: String,
+    name: String,
+    asname: String,
 }
 
 impl Violation for LowercaseImportedAsNonLowercase {
@@ -43,21 +44,30 @@ impl Violation for LowercaseImportedAsNonLowercase {
 }
 
 /// N812
-pub fn lowercase_imported_as_non_lowercase(
+pub(crate) fn lowercase_imported_as_non_lowercase(
     name: &str,
     asname: &str,
     alias: &Alias,
     stmt: &Stmt,
+    ignore_names: &[IdentifierPattern],
 ) -> Option<Diagnostic> {
-    if !str::is_upper(name) && str::is_lower(name) && asname.to_lowercase() != asname {
+    if ignore_names
+        .iter()
+        .any(|ignore_name| ignore_name.matches(asname))
+    {
+        return None;
+    }
+
+    if !str::is_cased_uppercase(name) && str::is_cased_lowercase(name) && !str::is_lowercase(asname)
+    {
         let mut diagnostic = Diagnostic::new(
             LowercaseImportedAsNonLowercase {
                 name: name.to_string(),
                 asname: asname.to_string(),
             },
-            Range::from(alias),
+            alias.range(),
         );
-        diagnostic.set_parent(stmt.location);
+        diagnostic.set_parent(stmt.start());
         return Some(diagnostic);
     }
     None

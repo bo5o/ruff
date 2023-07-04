@@ -1,8 +1,7 @@
-use rustpython_parser::ast::{Expr, ExprKind};
+use rustpython_parser::ast::{self, Expr, Ranged};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
@@ -35,7 +34,7 @@ use super::helpers;
 /// ```
 #[violation]
 pub struct UnnecessaryCallAroundSorted {
-    pub func: String,
+    func: String,
 }
 
 impl AlwaysAutofixableViolation for UnnecessaryCallAroundSorted {
@@ -52,7 +51,7 @@ impl AlwaysAutofixableViolation for UnnecessaryCallAroundSorted {
 }
 
 /// C413
-pub fn unnecessary_call_around_sorted(
+pub(crate) fn unnecessary_call_around_sorted(
     checker: &mut Checker,
     expr: &Expr,
     func: &Expr,
@@ -67,7 +66,7 @@ pub fn unnecessary_call_around_sorted(
     let Some(arg) = args.first() else {
         return;
     };
-    let ExprKind::Call { func, .. } = &arg.node else {
+    let Expr::Call(ast::ExprCall { func, .. }) = arg else {
         return;
     };
     let Some(inner) = helpers::expr_name(func) else {
@@ -76,18 +75,24 @@ pub fn unnecessary_call_around_sorted(
     if inner != "sorted" {
         return;
     }
-    if !checker.ctx.is_builtin(inner) || !checker.ctx.is_builtin(outer) {
+    if !checker.semantic().is_builtin(inner) || !checker.semantic().is_builtin(outer) {
         return;
     }
     let mut diagnostic = Diagnostic::new(
         UnnecessaryCallAroundSorted {
             func: outer.to_string(),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
         diagnostic.try_set_fix(|| {
-            fixes::fix_unnecessary_call_around_sorted(checker.locator, checker.stylist, expr)
+            let edit =
+                fixes::fix_unnecessary_call_around_sorted(checker.locator, checker.stylist, expr)?;
+            if outer == "reversed" {
+                Ok(Fix::suggested(edit))
+            } else {
+                Ok(Fix::automatic(edit))
+            }
         });
     }
     checker.diagnostics.push(diagnostic);

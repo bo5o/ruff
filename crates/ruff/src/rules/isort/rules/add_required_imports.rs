@@ -1,18 +1,17 @@
 use log::error;
-use rustpython_parser as parser;
-use rustpython_parser::ast::{Location, StmtKind, Suite};
+use ruff_text_size::{TextRange, TextSize};
+use rustpython_parser::ast::{self, Stmt, Suite};
+use rustpython_parser::Parse;
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic};
+use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Fix};
 use ruff_macros::{derive_message_formats, violation};
 use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_python_ast::imports::{Alias, AnyImport, FutureImport, Import, ImportFrom};
 use ruff_python_ast::source_code::{Locator, Stylist};
-use ruff_python_ast::types::Range;
 
 use crate::importer::Importer;
 use crate::registry::Rule;
-use crate::rules::isort::track::Block;
-use crate::settings::{flags, Settings};
+use crate::settings::Settings;
 
 /// ## What it does
 /// Adds any required imports, as specified by the user, to the top of the
@@ -53,57 +52,46 @@ impl AlwaysAutofixableViolation for MissingRequiredImport {
     }
 }
 
-fn contains(block: &Block, required_import: &AnyImport) -> bool {
-    block.imports.iter().any(|import| match required_import {
-        AnyImport::Import(required_import) => {
-            let StmtKind::Import {
-                names,
-            } = &import.node else {
+/// Return `true` if the [`Stmt`] includes the given [`AnyImport`].
+fn includes_import(stmt: &Stmt, target: &AnyImport) -> bool {
+    match target {
+        AnyImport::Import(target) => {
+            let Stmt::Import(ast::StmtImport { names, range: _ }) = &stmt else {
                 return false;
             };
             names.iter().any(|alias| {
-                alias.node.name == required_import.name.name
-                    && alias.node.asname.as_deref() == required_import.name.as_name
+                &alias.name == target.name.name && alias.asname.as_deref() == target.name.as_name
             })
         }
-        AnyImport::ImportFrom(required_import) => {
-            let StmtKind::ImportFrom {
+        AnyImport::ImportFrom(target) => {
+            let Stmt::ImportFrom(ast::StmtImportFrom {
                 module,
                 names,
                 level,
-            } = &import.node else {
+                range: _,
+            }) = &stmt
+            else {
                 return false;
             };
-            module.as_deref() == required_import.module
-                && *level == required_import.level
+            module.as_deref() == target.module
+                && level.map(|level| level.to_u32()) == target.level
                 && names.iter().any(|alias| {
-                    alias.node.name == required_import.name.name
-                        && alias.node.asname.as_deref() == required_import.name.as_name
+                    &alias.name == target.name.name
+                        && alias.asname.as_deref() == target.name.as_name
                 })
         }
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn add_required_import(
     required_import: &AnyImport,
-    blocks: &[&Block],
     python_ast: &Suite,
     locator: &Locator,
     stylist: &Stylist,
     settings: &Settings,
-    autofix: flags::Autofix,
     is_stub: bool,
 ) -> Option<Diagnostic> {
-    // If the import is already present in a top-level block, don't add it.
-    if blocks
-        .iter()
-        .filter(|block| !block.nested)
-        .any(|block| contains(block, required_import))
-    {
-        return None;
-    }
-
     // Don't add imports to semantically-empty files.
     if python_ast.iter().all(is_docstring_stmt) {
         return None;
@@ -114,25 +102,34 @@ fn add_required_import(
         return None;
     }
 
+    // If the import is already present in a top-level block, don't add it.
+    if python_ast
+        .iter()
+        .any(|stmt| includes_import(stmt, required_import))
+    {
+        return None;
+    }
+
     // Always insert the diagnostic at top-of-file.
     let mut diagnostic = Diagnostic::new(
         MissingRequiredImport(required_import.to_string()),
-        Range::new(Location::default(), Location::default()),
+        TextRange::default(),
     );
-    if autofix.into() && settings.rules.should_fix(Rule::MissingRequiredImport) {
-        diagnostic.set_fix(Importer::new(python_ast, locator, stylist).add_import(required_import));
+    if settings.rules.should_fix(Rule::MissingRequiredImport) {
+        diagnostic.set_fix(Fix::automatic(
+            Importer::new(python_ast, locator, stylist)
+                .add_import(required_import, TextSize::default()),
+        ));
     }
     Some(diagnostic)
 }
 
 /// I002
-pub fn add_required_imports(
-    blocks: &[&Block],
+pub(crate) fn add_required_imports(
     python_ast: &Suite,
     locator: &Locator,
     stylist: &Stylist,
     settings: &Settings,
-    autofix: flags::Autofix,
     is_stub: bool,
 ) -> Vec<Diagnostic> {
     settings
@@ -140,7 +137,7 @@ pub fn add_required_imports(
         .required_imports
         .iter()
         .flat_map(|required_import| {
-            let Ok(body) = parser::parse_program(required_import, "<filename>") else {
+            let Ok(body) = Suite::parse(required_import, "<filename>") else {
                 error!("Failed to parse required import: `{}`", required_import);
                 return vec![];
             };
@@ -152,49 +149,46 @@ pub fn add_required_imports(
                 return vec![];
             }
             let stmt = &body[0];
-            match &stmt.node {
-                StmtKind::ImportFrom {
+            match stmt {
+                Stmt::ImportFrom(ast::StmtImportFrom {
                     module,
                     names,
                     level,
-                } => names
+                    range: _,
+                }) => names
                     .iter()
                     .filter_map(|name| {
                         add_required_import(
                             &AnyImport::ImportFrom(ImportFrom {
-                                module: module.as_ref().map(String::as_str),
+                                module: module.as_deref(),
                                 name: Alias {
-                                    name: name.node.name.as_str(),
-                                    as_name: name.node.asname.as_deref(),
+                                    name: name.name.as_str(),
+                                    as_name: name.asname.as_deref(),
                                 },
-                                level: *level,
+                                level: level.map(|level| level.to_u32()),
                             }),
-                            blocks,
                             python_ast,
                             locator,
                             stylist,
                             settings,
-                            autofix,
                             is_stub,
                         )
                     })
                     .collect(),
-                StmtKind::Import { names } => names
+                Stmt::Import(ast::StmtImport { names, range: _ }) => names
                     .iter()
                     .filter_map(|name| {
                         add_required_import(
                             &AnyImport::Import(Import {
                                 name: Alias {
-                                    name: name.node.name.as_str(),
-                                    as_name: name.node.asname.as_deref(),
+                                    name: name.name.as_str(),
+                                    as_name: name.asname.as_deref(),
                                 },
                             }),
-                            blocks,
                             python_ast,
                             locator,
                             stylist,
                             settings,
-                            autofix,
                             is_stub,
                         )
                     })

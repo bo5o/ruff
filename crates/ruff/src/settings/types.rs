@@ -7,7 +7,6 @@ use std::string::ToString;
 use anyhow::{bail, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use pep440_rs::{Version as Pep440Version, VersionSpecifiers};
-use schemars::JsonSchema;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -20,27 +19,18 @@ use crate::registry::RuleSet;
 use crate::rule_selector::RuleSelector;
 
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialOrd,
-    Ord,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    CacheKey,
-    EnumIter,
+    Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize, CacheKey, EnumIter,
 )]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum PythonVersion {
     Py37,
     Py38,
     Py39,
     Py310,
     Py311,
+    Py312,
 }
 
 impl From<PythonVersion> for Pep440Version {
@@ -58,7 +48,16 @@ impl PythonVersion {
             Self::Py39 => (3, 9),
             Self::Py310 => (3, 10),
             Self::Py311 => (3, 11),
+            Self::Py312 => (3, 12),
         }
+    }
+
+    pub const fn major(&self) -> u32 {
+        self.as_tuple().0
+    }
+
+    pub const fn minor(&self) -> u32 {
+        self.as_tuple().1
     }
 
     pub fn get_minimum_supported_version(requires_version: &VersionSpecifiers) -> Option<Self> {
@@ -218,12 +217,14 @@ impl FromStr for PatternPrefixPair {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, JsonSchema, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Hash)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum SerializationFormat {
     Text,
     Json,
+    JsonLines,
     Junit,
     Grouped,
     Github,
@@ -238,8 +239,9 @@ impl Default for SerializationFormat {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Hash)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(try_from = "String")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Version(String);
 
 impl TryFrom<String> for Version {
@@ -257,3 +259,16 @@ impl Deref for Version {
         &self.0
     }
 }
+
+/// Pattern to match an identifier.
+///
+/// # Notes
+///
+/// [`glob::Pattern`] matches a little differently than we ideally want to.
+/// Specifically it uses `**` to match an arbitrary number of subdirectories,
+/// luckily this not relevant since identifiers don't contains slashes.
+///
+/// For reference pep8-naming uses
+/// [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) for
+/// pattern matching.
+pub type IdentifierPattern = glob::Pattern;

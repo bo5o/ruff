@@ -1,72 +1,70 @@
 use std::path::Path;
 
-use rustpython_parser::ast::{Expr, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Decorator, Stmt};
 
 use ruff_python_ast::call_path::{collect_call_path, CallPath};
 use ruff_python_ast::helpers::map_callable;
 
-use crate::context::Context;
+use crate::model::SemanticModel;
 
-#[derive(Debug, Clone, Copy)]
-pub enum Modifier {
-    Module,
-    Class,
-    Function,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, is_macro::Is)]
 pub enum Visibility {
     Public,
     Private,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct VisibleScope {
-    pub modifier: Modifier,
-    pub visibility: Visibility,
-}
-
 /// Returns `true` if a function is a "static method".
-pub fn is_staticmethod(ctx: &Context, decorator_list: &[Expr]) -> bool {
-    decorator_list.iter().any(|expr| {
-        ctx.resolve_call_path(map_callable(expr))
+pub fn is_staticmethod(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic
+            .resolve_call_path(map_callable(&decorator.expression))
             .map_or(false, |call_path| {
-                call_path.as_slice() == ["", "staticmethod"]
+                matches!(call_path.as_slice(), ["", "staticmethod"])
             })
     })
 }
 
 /// Returns `true` if a function is a "class method".
-pub fn is_classmethod(ctx: &Context, decorator_list: &[Expr]) -> bool {
-    decorator_list.iter().any(|expr| {
-        ctx.resolve_call_path(map_callable(expr))
+pub fn is_classmethod(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic
+            .resolve_call_path(map_callable(&decorator.expression))
             .map_or(false, |call_path| {
-                call_path.as_slice() == ["", "classmethod"]
+                matches!(call_path.as_slice(), ["", "classmethod"])
             })
     })
 }
 
 /// Returns `true` if a function definition is an `@overload`.
-pub fn is_overload(ctx: &Context, decorator_list: &[Expr]) -> bool {
-    decorator_list
-        .iter()
-        .any(|expr| ctx.match_typing_expr(map_callable(expr), "overload"))
+pub fn is_overload(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic.match_typing_expr(map_callable(&decorator.expression), "overload")
+    })
 }
 
 /// Returns `true` if a function definition is an `@override` (PEP 698).
-pub fn is_override(ctx: &Context, decorator_list: &[Expr]) -> bool {
-    decorator_list
-        .iter()
-        .any(|expr| ctx.match_typing_expr(map_callable(expr), "override"))
+pub fn is_override(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic.match_typing_expr(map_callable(&decorator.expression), "override")
+    })
 }
 
-/// Returns `true` if a function definition is an `@abstractmethod`.
-pub fn is_abstract(ctx: &Context, decorator_list: &[Expr]) -> bool {
-    decorator_list.iter().any(|expr| {
-        ctx.resolve_call_path(map_callable(expr))
+/// Returns `true` if a function definition is an abstract method based on its decorators.
+pub fn is_abstract(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic
+            .resolve_call_path(map_callable(&decorator.expression))
             .map_or(false, |call_path| {
-                call_path.as_slice() == ["abc", "abstractmethod"]
-                    || call_path.as_slice() == ["abc", "abstractproperty"]
+                matches!(
+                    call_path.as_slice(),
+                    [
+                        "abc",
+                        "abstractmethod"
+                            | "abstractclassmethod"
+                            | "abstractstaticmethod"
+                            | "abstractproperty"
+                    ]
+                )
             })
     })
 }
@@ -74,18 +72,32 @@ pub fn is_abstract(ctx: &Context, decorator_list: &[Expr]) -> bool {
 /// Returns `true` if a function definition is a `@property`.
 /// `extra_properties` can be used to check additional non-standard
 /// `@property`-like decorators.
-pub fn is_property(ctx: &Context, decorator_list: &[Expr], extra_properties: &[CallPath]) -> bool {
-    decorator_list.iter().any(|expr| {
-        ctx.resolve_call_path(map_callable(expr))
+pub fn is_property(
+    decorator_list: &[Decorator],
+    extra_properties: &[CallPath],
+    semantic: &SemanticModel,
+) -> bool {
+    decorator_list.iter().any(|decorator| {
+        semantic
+            .resolve_call_path(map_callable(&decorator.expression))
             .map_or(false, |call_path| {
-                call_path.as_slice() == ["", "property"]
-                    || call_path.as_slice() == ["functools", "cached_property"]
-                    || extra_properties
-                        .iter()
-                        .any(|extra_property| extra_property.as_slice() == call_path.as_slice())
+                matches!(
+                    call_path.as_slice(),
+                    ["", "property"] | ["functools", "cached_property"]
+                ) || extra_properties
+                    .iter()
+                    .any(|extra_property| extra_property.as_slice() == call_path.as_slice())
             })
     })
 }
+
+/// Returns `true` if a class is an `final`.
+pub fn is_final(decorator_list: &[Decorator], semantic: &SemanticModel) -> bool {
+    decorator_list
+        .iter()
+        .any(|decorator| semantic.match_typing_expr(map_callable(&decorator.expression), "final"))
+}
+
 /// Returns `true` if a function is a "magic method".
 pub fn is_magic(name: &str) -> bool {
     name.starts_with("__") && name.ends_with("__")
@@ -130,31 +142,48 @@ fn stem(path: &str) -> &str {
     }
 }
 
-/// Return the `Visibility` of the Python file at `Path` based on its name.
-pub fn module_visibility(module_path: Option<&[String]>, path: &Path) -> Visibility {
-    if let Some(module_path) = module_path {
-        if module_path.iter().any(|m| is_private_module(m)) {
-            return Visibility::Private;
-        }
-    } else {
-        // When module_path is None, path is a script outside a package, so just
-        // check to see if the module name itself is private.
-        // Ex) `_foo.py` (but not `__init__.py`)
-        let mut components = path.iter().rev();
-        if let Some(filename) = components.next() {
-            let module_name = filename.to_string_lossy();
-            let module_name = stem(&module_name);
-            if is_private_module(module_name) {
-                return Visibility::Private;
-            }
-        }
-    }
-    Visibility::Public
+/// A Python module can either be defined as a module path (i.e., the dot-separated path to the
+/// module) or, if the module can't be resolved, as a file path (i.e., the path to the file defining
+/// the module).
+#[derive(Debug)]
+pub enum ModuleSource<'a> {
+    /// A module path is a dot-separated path to the module.
+    Path(&'a [String]),
+    /// A file path is the path to the file defining the module, often a script outside of a
+    /// package.
+    File(&'a Path),
 }
 
-pub fn function_visibility(stmt: &Stmt) -> Visibility {
-    match &stmt.node {
-        StmtKind::FunctionDef { name, .. } | StmtKind::AsyncFunctionDef { name, .. } => {
+impl ModuleSource<'_> {
+    /// Return the `Visibility` of the module.
+    pub(crate) fn to_visibility(&self) -> Visibility {
+        match self {
+            Self::Path(path) => {
+                if path.iter().any(|m| is_private_module(m)) {
+                    return Visibility::Private;
+                }
+            }
+            Self::File(path) => {
+                // Check to see if the filename itself indicates private visibility.
+                // Ex) `_foo.py` (but not `__init__.py`)
+                let mut components = path.iter().rev();
+                if let Some(filename) = components.next() {
+                    let module_name = filename.to_string_lossy();
+                    let module_name = stem(&module_name);
+                    if is_private_module(module_name) {
+                        return Visibility::Private;
+                    }
+                }
+            }
+        }
+        Visibility::Public
+    }
+}
+
+pub(crate) fn function_visibility(stmt: &Stmt) -> Visibility {
+    match stmt {
+        Stmt::FunctionDef(ast::StmtFunctionDef { name, .. })
+        | Stmt::AsyncFunctionDef(ast::StmtAsyncFunctionDef { name, .. }) => {
             if name.starts_with('_') {
                 Visibility::Private
             } else {
@@ -165,21 +194,21 @@ pub fn function_visibility(stmt: &Stmt) -> Visibility {
     }
 }
 
-pub fn method_visibility(stmt: &Stmt) -> Visibility {
-    match &stmt.node {
-        StmtKind::FunctionDef {
+pub(crate) fn method_visibility(stmt: &Stmt) -> Visibility {
+    match stmt {
+        Stmt::FunctionDef(ast::StmtFunctionDef {
             name,
             decorator_list,
             ..
-        }
-        | StmtKind::AsyncFunctionDef {
+        })
+        | Stmt::AsyncFunctionDef(ast::StmtAsyncFunctionDef {
             name,
             decorator_list,
             ..
-        } => {
+        }) => {
             // Is this a setter or deleter?
-            if decorator_list.iter().any(|expr| {
-                collect_call_path(expr).map_or(false, |call_path| {
+            if decorator_list.iter().any(|decorator| {
+                collect_call_path(&decorator.expression).map_or(false, |call_path| {
                     call_path.as_slice() == [name, "setter"]
                         || call_path.as_slice() == [name, "deleter"]
                 })
@@ -203,9 +232,9 @@ pub fn method_visibility(stmt: &Stmt) -> Visibility {
     }
 }
 
-pub fn class_visibility(stmt: &Stmt) -> Visibility {
-    match &stmt.node {
-        StmtKind::ClassDef { name, .. } => {
+pub(crate) fn class_visibility(stmt: &Stmt) -> Visibility {
+    match stmt {
+        Stmt::ClassDef(ast::StmtClassDef { name, .. }) => {
             if name.starts_with('_') {
                 Visibility::Private
             } else {

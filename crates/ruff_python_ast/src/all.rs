@@ -1,9 +1,9 @@
 use bitflags::bitflags;
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Stmt, StmtKind};
+use rustpython_parser::ast::{self, Constant, Expr, Stmt};
 
 bitflags! {
-    #[derive(Default)]
-    pub struct AllNamesFlags: u32 {
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+    pub struct AllNamesFlags: u8 {
         const INVALID_FORMAT = 0b0000_0001;
         const INVALID_OBJECT = 0b0000_0010;
     }
@@ -18,10 +18,10 @@ where
 {
     fn add_to_names<'a>(elts: &'a [Expr], names: &mut Vec<&'a str>, flags: &mut AllNamesFlags) {
         for elt in elts {
-            if let ExprKind::Constant {
+            if let Expr::Constant(ast::ExprConstant {
                 value: Constant::Str(value),
                 ..
-            } = &elt.node
+            }) = elt
             {
                 names.push(value);
             } else {
@@ -30,44 +30,57 @@ where
         }
     }
 
-    fn extract_elts<F>(expr: &Expr, is_builtin: F) -> (Option<&Vec<Expr>>, AllNamesFlags)
+    fn extract_elts<F>(expr: &Expr, is_builtin: F) -> (Option<&[Expr]>, AllNamesFlags)
     where
         F: Fn(&str) -> bool,
     {
-        match &expr.node {
-            ExprKind::List { elts, .. } => {
+        match expr {
+            Expr::List(ast::ExprList { elts, .. }) => {
                 return (Some(elts), AllNamesFlags::empty());
             }
-            ExprKind::Tuple { elts, .. } => {
+            Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                 return (Some(elts), AllNamesFlags::empty());
             }
-            ExprKind::ListComp { .. } => {
+            Expr::ListComp(_) => {
                 // Allow comprehensions, even though we can't statically analyze them.
                 return (None, AllNamesFlags::empty());
             }
-            ExprKind::Call {
+            Expr::Name(ast::ExprName { id, .. }) => {
+                // Ex) `__all__ = __all__ + multiprocessing.__all__`
+                if id == "__all__" {
+                    return (None, AllNamesFlags::empty());
+                }
+            }
+            Expr::Attribute(ast::ExprAttribute { attr, .. }) => {
+                // Ex) `__all__ = __all__ + multiprocessing.__all__`
+                if attr == "__all__" {
+                    return (None, AllNamesFlags::empty());
+                }
+            }
+            Expr::Call(ast::ExprCall {
                 func,
                 args,
                 keywords,
                 ..
-            } => {
+            }) => {
                 // Allow `tuple()` and `list()` calls.
                 if keywords.is_empty() && args.len() <= 1 {
-                    if let ExprKind::Name { id, .. } = &func.node {
+                    if let Expr::Name(ast::ExprName { id, .. }) = &**func {
+                        let id = id.as_str();
                         if id == "tuple" || id == "list" {
                             if is_builtin(id) {
                                 if args.is_empty() {
                                     return (None, AllNamesFlags::empty());
                                 }
-                                match &args[0].node {
-                                    ExprKind::List { elts, .. }
-                                    | ExprKind::Set { elts, .. }
-                                    | ExprKind::Tuple { elts, .. } => {
+                                match &args[0] {
+                                    Expr::List(ast::ExprList { elts, .. })
+                                    | Expr::Set(ast::ExprSet { elts, .. })
+                                    | Expr::Tuple(ast::ExprTuple { elts, .. }) => {
                                         return (Some(elts), AllNamesFlags::empty());
                                     }
-                                    ExprKind::ListComp { .. }
-                                    | ExprKind::SetComp { .. }
-                                    | ExprKind::GeneratorExp { .. } => {
+                                    Expr::ListComp(_)
+                                    | Expr::SetComp(_)
+                                    | Expr::GeneratorExp(_) => {
                                         // Allow comprehensions, even though we can't statically analyze
                                         // them.
                                         return (None, AllNamesFlags::empty());
@@ -87,13 +100,13 @@ where
     let mut names: Vec<&str> = vec![];
     let mut flags = AllNamesFlags::empty();
 
-    if let Some(value) = match &stmt.node {
-        StmtKind::Assign { value, .. } => Some(value),
-        StmtKind::AnnAssign { value, .. } => value.as_ref(),
-        StmtKind::AugAssign { value, .. } => Some(value),
+    if let Some(value) = match stmt {
+        Stmt::Assign(ast::StmtAssign { value, .. }) => Some(value),
+        Stmt::AnnAssign(ast::StmtAnnAssign { value, .. }) => value.as_ref(),
+        Stmt::AugAssign(ast::StmtAugAssign { value, .. }) => Some(value),
         _ => None,
     } {
-        if let ExprKind::BinOp { left, right, .. } = &value.node {
+        if let Expr::BinOp(ast::ExprBinOp { left, right, .. }) = &**value {
             let mut current_left = left;
             let mut current_right = right;
             loop {
@@ -106,7 +119,7 @@ where
 
                 // Process the left side, which can be a "real" value or the "rest" of the
                 // binary operation.
-                if let ExprKind::BinOp { left, right, .. } = &current_left.node {
+                if let Expr::BinOp(ast::ExprBinOp { left, right, .. }) = &**current_left {
                     current_left = left;
                     current_right = right;
                 } else {

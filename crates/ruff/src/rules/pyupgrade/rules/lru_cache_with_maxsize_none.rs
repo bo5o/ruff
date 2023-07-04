@@ -1,13 +1,47 @@
-use rustpython_parser::ast::{Constant, Expr, ExprKind, KeywordData};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, Decorator, Expr, Keyword, Ranged};
 
 use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit, Fix};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::types::Range;
+use ruff_python_ast::helpers::is_const_none;
 
-use crate::autofix::actions::get_or_import_symbol;
 use crate::checkers::ast::Checker;
+use crate::importer::ImportRequest;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for uses of `functools.lru_cache` that set `maxsize=None`.
+///
+/// ## Why is this bad?
+/// Since Python 3.9, `functools.cache` can be used as a drop-in replacement
+/// for `functools.lru_cache(maxsize=None)`. When possible, prefer
+/// `functools.cache` as it is more readable and idiomatic.
+///
+/// ## Example
+/// ```python
+/// import functools
+///
+///
+/// @functools.lru_cache(maxsize=None)
+/// def foo():
+///     ...
+/// ```
+///
+/// Use instead:
+/// ```python
+/// import functools
+///
+///
+/// @functools.cache
+/// def foo():
+///     ...
+/// ```
+///
+/// ## Options
+/// - `target-version`
+///
+/// ## References
+/// - [Python documentation: `@functools.cache`](https://docs.python.org/3/library/functools.html#functools.cache)
 #[violation]
 pub struct LRUCacheWithMaxsizeNone;
 
@@ -23,13 +57,15 @@ impl AlwaysAutofixableViolation for LRUCacheWithMaxsizeNone {
 }
 
 /// UP033
-pub fn lru_cache_with_maxsize_none(checker: &mut Checker, decorator_list: &[Expr]) {
-    for expr in decorator_list.iter() {
-        let ExprKind::Call {
+pub(crate) fn lru_cache_with_maxsize_none(checker: &mut Checker, decorator_list: &[Decorator]) {
+    for decorator in decorator_list.iter() {
+        let Expr::Call(ast::ExprCall {
             func,
             args,
             keywords,
-        } = &expr.node else {
+            range: _,
+        }) = &decorator.expression
+        else {
             continue;
         };
 
@@ -37,38 +73,32 @@ pub fn lru_cache_with_maxsize_none(checker: &mut Checker, decorator_list: &[Expr
         if args.is_empty()
             && keywords.len() == 1
             && checker
-                .ctx
+                .semantic()
                 .resolve_call_path(func)
                 .map_or(false, |call_path| {
-                    call_path.as_slice() == ["functools", "lru_cache"]
+                    matches!(call_path.as_slice(), ["functools", "lru_cache"])
                 })
         {
-            let KeywordData { arg, value } = &keywords[0].node;
-            if arg.as_ref().map_or(false, |arg| arg == "maxsize")
-                && matches!(
-                    value.node,
-                    ExprKind::Constant {
-                        value: Constant::None,
-                        kind: None,
-                    }
-                )
-            {
+            let Keyword {
+                arg,
+                value,
+                range: _,
+            } = &keywords[0];
+            if arg.as_ref().map_or(false, |arg| arg == "maxsize") && is_const_none(value) {
                 let mut diagnostic = Diagnostic::new(
                     LRUCacheWithMaxsizeNone,
-                    Range::new(func.end_location.unwrap(), expr.end_location.unwrap()),
+                    TextRange::new(func.end(), decorator.end()),
                 );
                 if checker.patch(diagnostic.kind.rule()) {
                     diagnostic.try_set_fix(|| {
-                        let (import_edit, binding) = get_or_import_symbol(
-                            "functools",
-                            "cache",
-                            &checker.ctx,
-                            &checker.importer,
-                            checker.locator,
+                        let (import_edit, binding) = checker.importer.get_or_import_symbol(
+                            &ImportRequest::import("functools", "cache"),
+                            decorator.start(),
+                            checker.semantic(),
                         )?;
                         let reference_edit =
-                            Edit::replacement(binding, expr.location, expr.end_location.unwrap());
-                        Ok(Fix::from_iter([import_edit, reference_edit]))
+                            Edit::range_replacement(binding, decorator.expression.range());
+                        Ok(Fix::automatic_edits(import_edit, [reference_edit]))
                     });
                 }
                 checker.diagnostics.push(diagnostic);

@@ -1,16 +1,15 @@
-use num_traits::identities::Zero;
+use rustpython_parser::ast::{self, Constant, Decorator, Expr, Keyword};
+
 use ruff_python_ast::call_path::{collect_call_path, CallPath};
-use rustpython_parser::ast::{Constant, Expr, ExprKind, Keyword};
-
 use ruff_python_ast::helpers::map_callable;
+use ruff_python_semantic::SemanticModel;
+use ruff_python_whitespace::PythonWhitespace;
 
-use crate::checkers::ast::Checker;
-
-const ITERABLE_INITIALIZERS: &[&str] = &["dict", "frozenset", "list", "tuple", "set"];
-
-pub(super) fn get_mark_decorators(decorators: &[Expr]) -> impl Iterator<Item = (&Expr, CallPath)> {
+pub(super) fn get_mark_decorators(
+    decorators: &[Decorator],
+) -> impl Iterator<Item = (&Decorator, CallPath)> {
     decorators.iter().filter_map(|decorator| {
-        let Some(call_path) = collect_call_path(map_callable(decorator)) else {
+        let Some(call_path) = collect_call_path(map_callable(&decorator.expression)) else {
             return None;
         };
         if call_path.len() > 2 && call_path.as_slice()[..2] == ["pytest", "mark"] {
@@ -21,102 +20,41 @@ pub(super) fn get_mark_decorators(decorators: &[Expr]) -> impl Iterator<Item = (
     })
 }
 
-pub(super) fn is_pytest_fail(call: &Expr, checker: &Checker) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(call)
+pub(super) fn is_pytest_fail(call: &Expr, semantic: &SemanticModel) -> bool {
+    semantic.resolve_call_path(call).map_or(false, |call_path| {
+        matches!(call_path.as_slice(), ["pytest", "fail"])
+    })
+}
+
+pub(super) fn is_pytest_fixture(decorator: &Decorator, semantic: &SemanticModel) -> bool {
+    semantic
+        .resolve_call_path(map_callable(&decorator.expression))
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["pytest", "fail"]
+            matches!(call_path.as_slice(), ["pytest", "fixture"])
         })
 }
 
-pub(super) fn is_pytest_fixture(decorator: &Expr, checker: &Checker) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(if let ExprKind::Call { func, .. } = &decorator.node {
-            func
-        } else {
-            decorator
-        })
+pub(super) fn is_pytest_yield_fixture(decorator: &Decorator, semantic: &SemanticModel) -> bool {
+    semantic
+        .resolve_call_path(map_callable(&decorator.expression))
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["pytest", "fixture"]
+            matches!(call_path.as_slice(), ["pytest", "yield_fixture"])
         })
 }
 
-pub(super) fn is_pytest_yield_fixture(decorator: &Expr, checker: &Checker) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(map_callable(decorator))
+pub(super) fn is_pytest_parametrize(decorator: &Decorator, semantic: &SemanticModel) -> bool {
+    semantic
+        .resolve_call_path(map_callable(&decorator.expression))
         .map_or(false, |call_path| {
-            call_path.as_slice() == ["pytest", "yield_fixture"]
+            matches!(call_path.as_slice(), ["pytest", "mark", "parametrize"])
         })
 }
 
-pub(super) fn is_abstractmethod_decorator(decorator: &Expr, checker: &Checker) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(decorator)
-        .map_or(false, |call_path| {
-            call_path.as_slice() == ["abc", "abstractmethod"]
-        })
-}
-
-/// Check if the expression is a constant that evaluates to false.
-pub(super) fn is_falsy_constant(expr: &Expr) -> bool {
-    match &expr.node {
-        ExprKind::Constant { value, .. } => match value {
-            Constant::Bool(value) => !*value,
-            Constant::None => true,
-            Constant::Str(string) => string.is_empty(),
-            Constant::Bytes(bytes) => bytes.is_empty(),
-            Constant::Int(int) => int.is_zero(),
-            Constant::Float(float) => *float == 0.0,
-            Constant::Complex { real, imag } => *real == 0.0 && *imag == 0.0,
-            Constant::Ellipsis => true,
-            Constant::Tuple(elts) => elts.is_empty(),
-        },
-        ExprKind::JoinedStr { values, .. } => values.is_empty(),
-        ExprKind::Tuple { elts, .. } | ExprKind::List { elts, .. } => elts.is_empty(),
-        ExprKind::Dict { keys, .. } => keys.is_empty(),
-        ExprKind::Call {
-            func,
-            args,
-            keywords,
-        } => {
-            if let ExprKind::Name { id, .. } = &func.node {
-                if ITERABLE_INITIALIZERS.contains(&id.as_str()) {
-                    if args.is_empty() && keywords.is_empty() {
-                        return true;
-                    } else if !keywords.is_empty() {
-                        return false;
-                    } else if let Some(arg) = args.get(0) {
-                        return is_falsy_constant(arg);
-                    }
-                    return false;
-                }
-                false
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn is_pytest_parametrize(decorator: &Expr, checker: &Checker) -> bool {
-    checker
-        .ctx
-        .resolve_call_path(map_callable(decorator))
-        .map_or(false, |call_path| {
-            call_path.as_slice() == ["pytest", "mark", "parametrize"]
-        })
-}
-
-pub(super) fn keyword_is_literal(kw: &Keyword, literal: &str) -> bool {
-    if let ExprKind::Constant {
+pub(super) fn keyword_is_literal(keyword: &Keyword, literal: &str) -> bool {
+    if let Expr::Constant(ast::ExprConstant {
         value: Constant::Str(string),
         ..
-    } = &kw.node.value.node
+    }) = &keyword.value
     {
         string == literal
     } else {
@@ -125,16 +63,15 @@ pub(super) fn keyword_is_literal(kw: &Keyword, literal: &str) -> bool {
 }
 
 pub(super) fn is_empty_or_null_string(expr: &Expr) -> bool {
-    match &expr.node {
-        ExprKind::Constant {
+    match expr {
+        Expr::Constant(ast::ExprConstant {
             value: Constant::Str(string),
             ..
-        } => string.is_empty(),
-        ExprKind::Constant {
-            value: Constant::None,
-            ..
-        } => true,
-        ExprKind::JoinedStr { values } => values.iter().all(is_empty_or_null_string),
+        }) => string.is_empty(),
+        Expr::Constant(constant) if constant.value.is_none() => true,
+        Expr::JoinedStr(ast::ExprJoinedStr { values, range: _ }) => {
+            values.iter().all(is_empty_or_null_string)
+        }
         _ => false,
     }
 }
@@ -145,7 +82,7 @@ pub(super) fn split_names(names: &str) -> Vec<&str> {
     names
         .split(',')
         .filter_map(|s| {
-            let trimmed = s.trim();
+            let trimmed = s.trim_whitespace();
             if trimmed.is_empty() {
                 None
             } else {

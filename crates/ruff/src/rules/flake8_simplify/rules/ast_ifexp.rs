@@ -1,34 +1,76 @@
-use rustpython_parser::ast::{Constant, Expr, ExprContext, ExprKind, Unaryop};
+use ruff_text_size::TextRange;
+use rustpython_parser::ast::{self, Constant, Expr, ExprContext, Ranged, UnaryOp};
 
-use ruff_diagnostics::{AlwaysAutofixableViolation, Diagnostic, Edit};
+use ruff_diagnostics::{AlwaysAutofixableViolation, AutofixKind, Diagnostic, Edit, Fix, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::{create_expr, unparse_expr};
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
 use crate::registry::AsRule;
 
+/// ## What it does
+/// Checks for `if` expressions that can be replaced with `bool()` calls.
+///
+/// ## Why is this bad?
+/// `if` expressions that evaluate to `True` for a truthy condition an `False`
+/// for a falsey condition can be replaced with `bool()` calls, which are more
+/// concise and readable.
+///
+/// ## Example
+/// ```python
+/// True if a else False
+/// ```
+///
+/// Use instead:
+/// ```python
+/// bool(a)
+/// ```
+///
+/// ## References
+/// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
 #[violation]
 pub struct IfExprWithTrueFalse {
-    pub expr: String,
+    expr: String,
 }
 
-impl AlwaysAutofixableViolation for IfExprWithTrueFalse {
+impl Violation for IfExprWithTrueFalse {
+    const AUTOFIX: AutofixKind = AutofixKind::Sometimes;
+
     #[derive_message_formats]
     fn message(&self) -> String {
         let IfExprWithTrueFalse { expr } = self;
         format!("Use `bool({expr})` instead of `True if {expr} else False`")
     }
 
-    fn autofix_title(&self) -> String {
+    fn autofix_title(&self) -> Option<String> {
         let IfExprWithTrueFalse { expr } = self;
-        format!("Replace with `not {expr}")
+        Some(format!("Replace with `not {expr}"))
     }
 }
 
+/// ## What it does
+/// Checks for `if` expressions that can be replaced by negating a given
+/// condition.
+///
+/// ## Why is this bad?
+/// `if` expressions that evaluate to `False` for a truthy condition an `True`
+/// for a falsey condition can be replaced with `not` operators, which are more
+/// concise and readable.
+///
+/// ## Example
+/// ```python
+/// False if a else True
+/// ```
+///
+/// Use instead:
+/// ```python
+/// not a
+/// ```
+///
+/// ## References
+/// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
 #[violation]
 pub struct IfExprWithFalseTrue {
-    pub expr: String,
+    expr: String,
 }
 
 impl AlwaysAutofixableViolation for IfExprWithFalseTrue {
@@ -44,10 +86,29 @@ impl AlwaysAutofixableViolation for IfExprWithFalseTrue {
     }
 }
 
+/// ## What it does
+/// Checks for `if` expressions that check against a negated condition.
+///
+/// ## Why is this bad?
+/// `if` expressions that check against a negated condition are more difficult
+/// to read than `if` expressions that check against the condition directly.
+///
+/// ## Example
+/// ```python
+/// b if not a else a
+/// ```
+///
+/// Use instead:
+/// ```python
+/// a if a else b
+/// ```
+///
+/// ## References
+/// - [Python documentation: Truth Value Testing](https://docs.python.org/3/library/stdtypes.html#truth-value-testing)
 #[violation]
 pub struct IfExprWithTwistedArms {
-    pub expr_body: String,
-    pub expr_else: String,
+    expr_body: String,
+    expr_else: String,
 }
 
 impl AlwaysAutofixableViolation for IfExprWithTwistedArms {
@@ -73,20 +134,20 @@ impl AlwaysAutofixableViolation for IfExprWithTwistedArms {
 }
 
 /// SIM210
-pub fn explicit_true_false_in_ifexpr(
+pub(crate) fn explicit_true_false_in_ifexpr(
     checker: &mut Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
     orelse: &Expr,
 ) {
-    let ExprKind::Constant { value, .. } = &body.node else {
+    let Expr::Constant(ast::ExprConstant { value, .. }) = &body else {
         return;
     };
     if !matches!(value, Constant::Bool(true)) {
         return;
     }
-    let ExprKind::Constant { value, .. } = &orelse.node else {
+    let Expr::Constant(ast::ExprConstant { value, .. }) = &orelse else {
         return;
     };
     if !matches!(value, Constant::Bool(false)) {
@@ -95,53 +156,52 @@ pub fn explicit_true_false_in_ifexpr(
 
     let mut diagnostic = Diagnostic::new(
         IfExprWithTrueFalse {
-            expr: unparse_expr(test, checker.stylist),
+            expr: checker.generator().expr(test),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        if matches!(test.node, ExprKind::Compare { .. }) {
-            diagnostic.set_fix(Edit::replacement(
-                unparse_expr(&test.clone(), checker.stylist),
-                expr.location,
-                expr.end_location.unwrap(),
-            ));
-        } else if checker.ctx.is_builtin("bool") {
-            diagnostic.set_fix(Edit::replacement(
-                unparse_expr(
-                    &create_expr(ExprKind::Call {
-                        func: Box::new(create_expr(ExprKind::Name {
-                            id: "bool".to_string(),
-                            ctx: ExprContext::Load,
-                        })),
-                        args: vec![test.clone()],
-                        keywords: vec![],
-                    }),
-                    checker.stylist,
-                ),
-                expr.location,
-                expr.end_location.unwrap(),
-            ));
+        if matches!(test, Expr::Compare(_)) {
+            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                checker.generator().expr(&test.clone()),
+                expr.range(),
+            )));
+        } else if checker.semantic().is_builtin("bool") {
+            let node = ast::ExprName {
+                id: "bool".into(),
+                ctx: ExprContext::Load,
+                range: TextRange::default(),
+            };
+            let node1 = ast::ExprCall {
+                func: Box::new(node.into()),
+                args: vec![test.clone()],
+                keywords: vec![],
+                range: TextRange::default(),
+            };
+            diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+                checker.generator().expr(&node1.into()),
+                expr.range(),
+            )));
         };
     }
     checker.diagnostics.push(diagnostic);
 }
 
 /// SIM211
-pub fn explicit_false_true_in_ifexpr(
+pub(crate) fn explicit_false_true_in_ifexpr(
     checker: &mut Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
     orelse: &Expr,
 ) {
-    let ExprKind::Constant { value, .. } = &body.node else {
+    let Expr::Constant(ast::ExprConstant { value, .. }) = &body else {
         return;
     };
     if !matches!(value, Constant::Bool(false)) {
         return;
     }
-    let ExprKind::Constant { value, .. } = &orelse.node else {
+    let Expr::Constant(ast::ExprConstant { value, .. }) = &orelse else {
         return;
     };
     if !matches!(value, Constant::Bool(true)) {
@@ -150,46 +210,50 @@ pub fn explicit_false_true_in_ifexpr(
 
     let mut diagnostic = Diagnostic::new(
         IfExprWithFalseTrue {
-            expr: unparse_expr(test, checker.stylist),
+            expr: checker.generator().expr(test),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            unparse_expr(
-                &create_expr(ExprKind::UnaryOp {
-                    op: Unaryop::Not,
-                    operand: Box::new(create_expr(test.node.clone())),
-                }),
-                checker.stylist,
-            ),
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+        let node = test.clone();
+        let node1 = ast::ExprUnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(node),
+            range: TextRange::default(),
+        };
+        diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+            checker.generator().expr(&node1.into()),
+            expr.range(),
+        )));
     }
     checker.diagnostics.push(diagnostic);
 }
 
 /// SIM212
-pub fn twisted_arms_in_ifexpr(
+pub(crate) fn twisted_arms_in_ifexpr(
     checker: &mut Checker,
     expr: &Expr,
     test: &Expr,
     body: &Expr,
     orelse: &Expr,
 ) {
-    let ExprKind::UnaryOp { op, operand: test_operand } = &test.node else {
+    let Expr::UnaryOp(ast::ExprUnaryOp {
+        op,
+        operand: test_operand,
+        range: _,
+    }) = &test
+    else {
         return;
     };
-    if !matches!(op, Unaryop::Not) {
+    if !op.is_not() {
         return;
     }
 
     // Check if the test operand and else branch use the same variable.
-    let ExprKind::Name { id: test_id, .. } = &test_operand.node else {
+    let Expr::Name(ast::ExprName { id: test_id, .. }) = test_operand.as_ref() else {
         return;
     };
-    let ExprKind::Name {id: orelse_id, ..} = &orelse.node else {
+    let Expr::Name(ast::ExprName { id: orelse_id, .. }) = orelse else {
         return;
     };
     if !test_id.eq(orelse_id) {
@@ -198,24 +262,25 @@ pub fn twisted_arms_in_ifexpr(
 
     let mut diagnostic = Diagnostic::new(
         IfExprWithTwistedArms {
-            expr_body: unparse_expr(body, checker.stylist),
-            expr_else: unparse_expr(orelse, checker.stylist),
+            expr_body: checker.generator().expr(body),
+            expr_else: checker.generator().expr(orelse),
         },
-        Range::from(expr),
+        expr.range(),
     );
     if checker.patch(diagnostic.kind.rule()) {
-        diagnostic.set_fix(Edit::replacement(
-            unparse_expr(
-                &create_expr(ExprKind::IfExp {
-                    test: Box::new(create_expr(orelse.node.clone())),
-                    body: Box::new(create_expr(orelse.node.clone())),
-                    orelse: Box::new(create_expr(body.node.clone())),
-                }),
-                checker.stylist,
-            ),
-            expr.location,
-            expr.end_location.unwrap(),
-        ));
+        let node = body.clone();
+        let node1 = orelse.clone();
+        let node2 = orelse.clone();
+        let node3 = ast::ExprIfExp {
+            test: Box::new(node2),
+            body: Box::new(node1),
+            orelse: Box::new(node),
+            range: TextRange::default(),
+        };
+        diagnostic.set_fix(Fix::suggested(Edit::range_replacement(
+            checker.generator().expr(&node3.into()),
+            expr.range(),
+        )));
     }
     checker.diagnostics.push(diagnostic);
 }

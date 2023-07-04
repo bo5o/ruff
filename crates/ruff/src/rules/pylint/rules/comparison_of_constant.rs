@@ -1,69 +1,37 @@
-use std::fmt;
-
 use itertools::Itertools;
-use rustpython_parser::ast::{Cmpop, Expr, ExprKind, Located};
+use rustpython_parser::ast::{self, CmpOp, Expr, Ranged};
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::unparse_constant;
-use ruff_python_ast::types::Range;
 
 use crate::checkers::ast::Checker;
+use crate::rules::pylint::helpers::CmpOpExt;
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum ViolationsCmpop {
-    Eq,
-    NotEq,
-    Lt,
-    LtE,
-    Gt,
-    GtE,
-    Is,
-    IsNot,
-    In,
-    NotIn,
-}
-
-impl From<&Cmpop> for ViolationsCmpop {
-    fn from(cmpop: &Cmpop) -> Self {
-        match cmpop {
-            Cmpop::Eq => Self::Eq,
-            Cmpop::NotEq => Self::NotEq,
-            Cmpop::Lt => Self::Lt,
-            Cmpop::LtE => Self::LtE,
-            Cmpop::Gt => Self::Gt,
-            Cmpop::GtE => Self::GtE,
-            Cmpop::Is => Self::Is,
-            Cmpop::IsNot => Self::IsNot,
-            Cmpop::In => Self::In,
-            Cmpop::NotIn => Self::NotIn,
-        }
-    }
-}
-
-impl fmt::Display for ViolationsCmpop {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let representation = match self {
-            Self::Eq => "==",
-            Self::NotEq => "!=",
-            Self::Lt => "<",
-            Self::LtE => "<=",
-            Self::Gt => ">",
-            Self::GtE => ">=",
-            Self::Is => "is",
-            Self::IsNot => "is not",
-            Self::In => "in",
-            Self::NotIn => "not in",
-        };
-        write!(f, "{representation}")
-    }
-}
-
+/// ## What it does
+/// Checks for comparisons between constants.
+///
+/// ## Why is this bad?
+/// Comparing two constants will always resolve to the same value, so the
+/// comparison is redundant. Instead, the expression should be replaced
+/// with the result of the comparison.
+///
+/// ## Example
+/// ```python
+/// foo = 1 == 1
+/// ```
+///
+/// Use instead:
+/// ```python
+/// foo = True
+/// ```
+///
+/// ## References
+/// - [Python documentation: Comparisons](https://docs.python.org/3/reference/expressions.html#comparisons)
 #[violation]
 pub struct ComparisonOfConstant {
-    pub left_constant: String,
-    pub op: ViolationsCmpop,
-    pub right_constant: String,
+    left_constant: String,
+    op: CmpOp,
+    right_constant: String,
 }
 
 impl Violation for ComparisonOfConstant {
@@ -76,42 +44,42 @@ impl Violation for ComparisonOfConstant {
         } = self;
 
         format!(
-            "Two constants compared in a comparison, consider replacing `{left_constant} {op} \
-             {right_constant}`"
+            "Two constants compared in a comparison, consider replacing `{left_constant} {} {right_constant}`",
+            CmpOpExt::from(op)
         )
     }
 }
 
 /// PLR0133
-pub fn comparison_of_constant(
+pub(crate) fn comparison_of_constant(
     checker: &mut Checker,
     left: &Expr,
-    ops: &[Cmpop],
+    ops: &[CmpOp],
     comparators: &[Expr],
 ) {
     for ((left, right), op) in std::iter::once(left)
         .chain(comparators.iter())
-        .tuple_windows::<(&Located<_>, &Located<_>)>()
+        .tuple_windows()
         .zip(ops)
     {
         if let (
-            ExprKind::Constant {
+            Expr::Constant(ast::ExprConstant {
                 value: left_constant,
                 ..
-            },
-            ExprKind::Constant {
+            }),
+            Expr::Constant(ast::ExprConstant {
                 value: right_constant,
                 ..
-            },
-        ) = (&left.node, &right.node)
+            }),
+        ) = (&left, &right)
         {
             let diagnostic = Diagnostic::new(
                 ComparisonOfConstant {
-                    left_constant: unparse_constant(left_constant, checker.stylist),
-                    op: op.into(),
-                    right_constant: unparse_constant(right_constant, checker.stylist),
+                    left_constant: checker.generator().constant(left_constant),
+                    op: *op,
+                    right_constant: checker.generator().constant(right_constant),
                 },
-                Range::from(left),
+                left.range(),
             );
 
             checker.diagnostics.push(diagnostic);
