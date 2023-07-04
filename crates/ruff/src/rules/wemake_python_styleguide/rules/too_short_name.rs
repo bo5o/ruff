@@ -2,8 +2,7 @@ use rustpython_parser::ast::Stmt;
 
 use ruff_diagnostics::{Diagnostic, Violation};
 use ruff_macros::{derive_message_formats, violation};
-use ruff_python_ast::helpers::identifier_range;
-use ruff_python_ast::source_code::Locator;
+use ruff_python_ast::identifier::Identifier;
 
 /// ## What it does
 /// Checks for short variable or module names.
@@ -39,13 +38,12 @@ impl Violation for TooShortName {
 }
 
 /// WPS111
-pub fn too_short_name(
+pub(crate) fn too_short_name(
     stmt: &Stmt,
     name: &str,
-    _min_name_length: usize,
-    locator: &Locator,
+    min_name_length: usize,
 ) -> Option<Diagnostic> {
-    if name.len() >= 2 {
+    if name.len() >= min_name_length {
         return None;
     }
 
@@ -53,6 +51,6 @@ pub fn too_short_name(
         TooShortName {
             name: name.to_string(),
         },
-        identifier_range(stmt, locator),
+        stmt.identifier(),
     ))
 }

@@ -590,13 +590,6 @@
         "$ref": "#/definitions/RuleSelector"
       }
     },
-    "update-check": {
-      "description": "Enable or disable automatic update checks (overridden by the `--update-check` and `--no-update-check` command-line flags).",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "wemake-python-styleguide": {
       "description": "Options for the `wemake-python-styleguide` plugin.",
       "anyOf": [
@@ -2702,7 +2695,7 @@
       "type": "object",
       "properties": {
         "min-name-length": {
-          "description": "Minimum name length for variables and methods.",
+          "description": "Minimum number of chars to define a valid variable and module name.",
           "type": [
             "integer",
             "null"

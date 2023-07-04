@@ -1683,13 +1683,12 @@ where
                 }
                 if self.settings.rules.enabled(Rule::TooShortName) {
                     for target in targets.iter() {
-                        if let ExprKind::Name { id, .. } = &target.node {
+                        if let Expr::Name(ast::ExprName { id, .. }) = target {
                             if let Some(diagnostic) =
                                 wemake_python_styleguide::rules::too_short_name(
                                     stmt,
                                     id,
                                     self.settings.wemake_python_styleguide.min_name_length,
-                                    self.locator,
                                 )
                             {
                                 self.diagnostics.push(diagnostic);

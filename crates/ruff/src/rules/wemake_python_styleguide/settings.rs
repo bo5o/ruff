@@ -1,27 +1,28 @@
 //! Settings for the `wemake-python-styleguide` plugin.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use ruff_macros::{CacheKey, ConfigurationOptions};
+use ruff_macros::{CacheKey, CombineOptions, ConfigurationOptions};
 
 #[derive(
-    Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions, JsonSchema,
+    Debug, PartialEq, Eq, Serialize, Deserialize, Default, ConfigurationOptions, CombineOptions,
 )]
 #[serde(
     deny_unknown_fields,
     rename_all = "kebab-case",
     rename = "WemakePythonStyleguideOptions"
 )]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Options {
     #[option(
         default = r#"2"#,
         value_type = "int",
         example = r#"
+            # Minimum number of chars to define a valid variable and module name.
             min-name-length = 3
         "#
     )]
-    /// Minimum name length for variables and methods.
+    /// Minimum number of chars to define a valid variable and module name.
     pub min_name_length: Option<usize>,
 }
 
