@@ -1,0 +1,20 @@
+---
+source: crates/ruff/src/rules/wemake_python_styleguide/mod.rs
+---
+WPS114.py:6:1: WPS114 Found underscored number name pattern: `star_wars_episode_2`
+  |
+5 | # Wrong:
+6 | star_wars_episode_2 = "not so awesome"
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ WPS114
+7 | iso_123_456 = "some data"
+  |
+
+WPS114.py:7:1: WPS114 Found underscored number name pattern: `iso_123_456`
+  |
+5 | # Wrong:
+6 | star_wars_episode_2 = "not so awesome"
+7 | iso_123_456 = "some data"
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ WPS114
+  |
+
+

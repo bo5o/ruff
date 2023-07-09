@@ -826,6 +826,7 @@ pub fn code_to_rule(linter: Linter, code: &str) -> Option<(RuleGroup, Rule)> {
 
         // wemake-python-styleguide
         (WemakePythonStyleguide, "111") => (RuleGroup::Unspecified, rules::wemake_python_styleguide::rules::TooShortName),
+        (WemakePythonStyleguide, "114") => (RuleGroup::Unspecified, rules::wemake_python_styleguide::rules::UnderscoredNumberName),
 
         _ => return None,
     })

@@ -1704,6 +1704,15 @@ where
                     if self.enabled(Rule::TooShortName) {
                         wemake_python_styleguide::rules::too_short_name(self, target, true);
                     }
+                    if let Expr::Name(ast::ExprName { id, .. }) = target {
+                        if self.settings.rules.enabled(Rule::UnderscoredNumberName) {
+                            if let Some(diagnostic) =
+                                wemake_python_styleguide::rules::underscored_number_name(stmt, id)
+                            {
+                                self.diagnostics.push(diagnostic);
+                            };
+                        }
+                    }
                 }
             }
             Stmt::AnnAssign(ast::StmtAnnAssign {
